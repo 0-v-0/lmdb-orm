@@ -19,3 +19,5 @@ enum unique;
 /// foreign key
 template foreign(alias field) {
 }
+
+package(lmdb_orm) enum isPOD(T) = __traits(isPOD, T);
