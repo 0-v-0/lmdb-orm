@@ -52,7 +52,30 @@ struct Cursor {
 		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.prev);
 	}
 
+	/// Retrieve by cursor.
+	int get(ref Val key, ref Val val, CursorOp op = CursorOp.next)
+		=> mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, op);
+
+	/// Store by cursor.
+	int set(const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
+		=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+	/// Delete by cursor.
+	int del(DeleteFlags flags = DeleteFlags.none)
+		=> mdb_cursor_del(cursor, flags);
+
 @property:
+	/// Return count of duplicates for current key.
+	size_t count() @trusted {
+		size_t count = void;
+		check(mdb_cursor_count(cursor, &count));
+		return count;
+	}
+
+	/// Return the cursor's database handle.
+	LMDB dbi() @trusted
+		=> LMDB(Txn(cursor.txn), mdb_cursor_dbi(cursor));
+
 	bool empty() @trusted {
 		if (opOffset <= rc && rc <= opOffset + CursorOp.max)
 			rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, cast(MDB_cursor_op)(
@@ -106,6 +129,13 @@ class MbdError : Exception {
 	mixin basicExceptionCtors;
 }
 
+/** Check for LMDB errors and throw an exception if one is found.
+This function checks the return code from an LMDB function call and throws an
+exception if an error occurred.
+Params:
+origin = The origin of the LMDB function call (for error messages)
+rc = The return code from an LMDB function call
+ */
 void check(string origin = __FUNCTION__)(int rc) {
 	import std.conv : text;
 
@@ -121,7 +151,7 @@ enum EnvFlags : uint {
 	/** mmap at a fixed address (experimental) */
 	fixedMap = MDB_FIXEDMAP,
 	/** no environment directory */
-	noSubDir = MDB_NOSUBDIR,
+	noSubdir = MDB_NOSUBDIR,
 	/** don't fsync after commit */
 	noSync = MDB_NOSYNC,
 	/** read only */
@@ -190,6 +220,8 @@ enum WriteFlags : uint {
 /** Delete Flags */
 enum DeleteFlags : WriteFlags {
 	none,
+	/** delete all of the data items for the current key.
+    	This flag may only be specified if the database was opened with #MDB_DUPSORT. */
 	noDupData = WriteFlags.noDupData,
 }
 
@@ -300,10 +332,32 @@ Params:
 env = the environment handle
 Returns: the environment flags
  */
-uint flags(Env env) @trusted {
+@property uint flags(Env env) @trusted {
 	uint flags = void;
 	check(mdb_env_get_flags(env, &flags));
 	return flags;
+}
+
+/** Get the path of the environment.
+Params:
+env = the environment handle
+Returns: the path
+ */
+@property string path(Env env) @trusted {
+	char* path = void;
+	check(mdb_env_get_path(env, &path));
+	return cast(string)fromStringz(path);
+}
+
+/** Get the file descriptor for the environment.
+Params:
+env = the environment handle
+Returns: the file descriptor
+ */
+@property auto fd(Env env) @trusted {
+	FileHandle fd = void;
+	check(mdb_env_get_fd(env, &fd));
+	return fd;
 }
 
 /** Copy an LMDB environment to the specified path.
@@ -389,6 +443,17 @@ size = the size of the memory map
 	return env;
 }
 
+/** Check for stale entries in the reader lock table.
+Params:
+env = the environment handle
+Returns: dead Number of stale slots that were cleared
+ */
+int readerCheck(Env env) @trusted {
+	int dead = void;
+	check(mdb_reader_check(env, &dead));
+	return dead;
+}
+
 /** Begin a transaction.
 Params:
 env = the environment handle
@@ -438,7 +503,8 @@ LMDB open(Txn txn, scope const char* name, DBFlags flags = DBFlags.none) @truste
 
 /// A database handle
 struct LMDB {
-	private Txn txn;
+	package Txn txn;
+	/// The database handle
 	const MDB_dbi dbi;
 
 	/// Get the database flags.
@@ -499,41 +565,45 @@ nothrow:
 	int set(const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
-	int set(Val key, Val val, WriteFlags flags = WriteFlags.none)
+	/// ditto
+	int set(in Val key, in Val val, WriteFlags flags = WriteFlags.none)
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+	/** Delete items from the database.
+	Params:
+		key = the key to delete
+		val = the data item to delete, if any
+	Returns: 0 on success, non-zero on failure.
+	 */
+	int del(const ref Val key)
+		=> mdb_del(txn, dbi, cast(MDB_val*)&key, null);
+
+	/// ditto
+	int del(in Val key)
+		=> mdb_del(txn, dbi, cast(MDB_val*)&key, null);
+
+	/// ditto
+	int del(const ref Val key, const ref Val val)
+		=> mdb_del(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
+
+	/// ditto
+	int del(in Val key, in Val val)
+		=> mdb_del(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
 
 	/// Close the database handle.
 	void close() => mdb_dbi_close(txn.env, dbi);
 
-	/// Empty or delete+close a database.
+	/** Empty or delete+close a database.
+	Params:
+		del = if true, delete the database in addition to closing it
+	Returns: 0 on success, non-zero on failure.
+	 */
 	int drop(bool del = false) => mdb_drop(txn, dbi, del);
 }
 
 alias txn = mdb_cursor_txn;
 
-/// Return the cursor's database handle.
-@property LMDB dbi(Cursor cursor) @trusted
-	=> LMDB(Txn(cursor.txn), mdb_cursor_dbi(cursor));
-
-/// Retrieve by cursor.
-int get(Cursor cursor, ref Val key, ref Val val, CursorOp op = CursorOp.next)
-	=> mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, op);
-
-/// Store by cursor.
-int set(Cursor cursor, const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
-	=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
-
-/// Delete by cursor.
-int del(Cursor cursor, DeleteFlags flags = DeleteFlags.none)
-	=> mdb_cursor_del(cursor, flags);
-
-/// Return count of duplicates for current key.
-@property size_t count(Cursor cursor) @trusted {
-	size_t count = void;
-	check(mdb_cursor_count(cursor, &count));
-	return count;
-}
-
+/// Renew a cursor handle.
 alias renew = mdb_cursor_renew;
 
 /// Close a cursor handle.
@@ -548,7 +618,7 @@ unittest {
 		close(env);
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.fixedMap));
+	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.noSubdir | EnvFlags.writeMap));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);
@@ -558,17 +628,19 @@ unittest {
 	Txn txn = env.begin();
 	writeln("id: ", txn.id);
 	LMDB db = txn.open("test", DBFlags.create);
+	writeln("dbi: ", db.dbi);
 	scope (exit)
 		db.txn.abort();
 	scope (exit)
 		db.close();
 	auto key = "foo";
-	auto value = "4";
+	auto value = "3";
 	check(db.set(key, value));
 	txn.commit();
 	db.txn = env.begin(TxnFlags.readOnly);
 	writeln("stat: ", db.stat);
 	foreach (k, v; db.cursor()) {
 		writeln(cast(string)k, ": ", cast(string)v);
+		writeln(k.ptr, ": ", v.ptr);
 	}
 }
