@@ -9,24 +9,62 @@ version (unittest) {
 }
 
 private struct NonNull(T) {
-	package(lmdb_orm) T value;
 	alias value this;
+	@property T value() => val;
 
-	private this(T val)
-	in (val !is null) {
-		value = val;
+private:
+	T val;
+	this(T x)
+	in (x !is null) {
+		val = x;
 	}
 }
 
 private alias CO = MDB_cursor_op;
 
-/**< -rw-r--r-- */
+/** -rw-r--r-- */
 enum defaultMode = octal!644;
 
 alias Env = NonNull!(MDB_env*);
 alias Txn = NonNull!(MDB_txn*);
-alias Cursor = NonNull!(MDB_cursor*);
 alias Val = const(void)[];
+private enum opOffset = MDB_LAST_ERRCODE + 1;
+
+struct Cursor {
+	import std.typecons : tuple;
+
+	private MDB_cursor* cursor;
+	alias cursor this;
+	Val key;
+	Val val;
+	private int rc;
+	private this(MDB_cursor* cur, CursorOp op)
+	in (cur !is null) {
+		cursor = cur;
+		rc = cast(int)op + opOffset;
+	}
+
+	void popFront() @trusted {
+		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.next);
+	}
+
+	void popBack() @trusted {
+		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.prev);
+	}
+
+@property:
+	bool empty() @trusted {
+		if (opOffset <= rc && rc <= opOffset + CursorOp.max)
+			rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, cast(MDB_cursor_op)(
+					rc - opOffset));
+		if (rc != MDB_NOTFOUND)
+			check(rc);
+		return rc == MDB_NOTFOUND;
+	}
+
+	auto ref front() => tuple(key, val);
+	alias back = front;
+}
 
 /** Return the LMDB library version information.
 Params:
@@ -68,9 +106,11 @@ class MbdError : Exception {
 	mixin basicExceptionCtors;
 }
 
-package void check(string origin = __FUNCTION__)(int rc) {
+void check(string origin = __FUNCTION__)(int rc) {
+	import std.conv : text;
+
 	if (rc) {
-		auto msg = origin ~ ": " ~ errorString(rc);
+		auto msg = origin ~ ": " ~ errorString(rc) ~ text(" (", rc, ")");
 		throw new MbdError(msg);
 	}
 }
@@ -155,38 +195,54 @@ enum DeleteFlags : WriteFlags {
 
 /** Cursor Operations */
 enum CursorOp : CO {
-	first = CO.MDB_FIRST, /**< Position at first key/data item */
-	firstDup = CO.MDB_FIRST_DUP, /**< Position at first data item of current key.
+	first = CO.MDB_FIRST, /** Position at first key/data item */
+	firstDup = CO.MDB_FIRST_DUP, /** Position at first data item of current key.
                                     Only for #MDB_DUPSORT */
-	getBoth = CO.MDB_GET_BOTH, /**< Position at key/data pair. Only for #MDB_DUPSORT */
-	getBothRange = CO.MDB_GET_BOTH_RANGE, /**< position at key, nearest data. Only for #MDB_DUPSORT */
-	getCurrent = CO.MDB_GET_CURRENT, /**< Return key/data at current cursor position */
-	getMultiple = CO.MDB_GET_MULTIPLE, /**< Return up to a page of duplicate data items
+	getBoth = CO.MDB_GET_BOTH, /** Position at key/data pair. Only for #MDB_DUPSORT */
+	getBothRange = CO.MDB_GET_BOTH_RANGE, /** position at key, nearest data. Only for #MDB_DUPSORT */
+	getCurrent = CO.MDB_GET_CURRENT, /** Return key/data at current cursor position */
+	getMultiple = CO.MDB_GET_MULTIPLE, /** Return up to a page of duplicate data items
 							from current cursor position. Move cursor to prepare
 							for #MDB_NEXT_MULTIPLE. Only for #MDB_DUPFIXED */
-	last = CO.MDB_LAST, /**< Position at last key/data item */
-	lastDup = CO.MDB_LAST_DUP, /**< Position at last data item of current key.
+	last = CO.MDB_LAST, /** Position at last key/data item */
+	lastDup = CO.MDB_LAST_DUP, /** Position at last data item of current key.
                                     Only for #MDB_DUPSORT */
-	next = CO.MDB_NEXT, /**< Position at next data item */
-	nextDup = CO.MDB_NEXT_DUP, /**< Position at next data item of current key.
+	next = CO.MDB_NEXT, /** Position at next data item */
+	nextDup = CO.MDB_NEXT_DUP, /** Position at next data item of current key.
 						Only for #MDB_DUPSORT */
-	nextMultiple = CO.MDB_NEXT_MULTIPLE, /**< Return up to a page of duplicate data items
+	nextMultiple = CO.MDB_NEXT_MULTIPLE, /** Return up to a page of duplicate data items
 						from next cursor position. Move cursor to prepare
 						for #MDB_NEXT_MULTIPLE. Only for #MDB_DUPFIXED */
-	nextNoDup = CO.MDB_NEXT_NODUP, /**< Position at first data item of next key */
-	prev = CO.MDB_PREV, /**< Position at previous data item */
-	prevDup = CO.MDB_PREV_DUP, /**< Position at previous data item of current key.
+	nextNoDup = CO.MDB_NEXT_NODUP, /** Position at first data item of next key */
+	prev = CO.MDB_PREV, /** Position at previous data item */
+	prevDup = CO.MDB_PREV_DUP, /** Position at previous data item of current key.
                                     Only for #MDB_DUPSORT */
-	prevNoDup = CO.MDB_PREV_NODUP, /**< Position at last data item of previous key */
-	set = CO.MDB_SET, /**< Position at specified key */
-	setKey = CO.MDB_SET_KEY, /**< Position at specified key, return key + data */
-	setRange = CO.MDB_SET_RANGE, /**< Position at first key greater than or equal to specified key. */
-	prevMultiple = CO.MDB_PREV_MULTIPLE, /**< Position at previous page and return up to
+	prevNoDup = CO.MDB_PREV_NODUP, /** Position at last data item of previous key */
+	set = CO.MDB_SET, /** Position at specified key */
+	setKey = CO.MDB_SET_KEY, /** Position at specified key, return key + data */
+	setRange = CO.MDB_SET_RANGE, /** Position at first key greater than or equal to specified key. */
+	prevMultiple = CO.MDB_PREV_MULTIPLE /** Position at previous page and return up to
 							a page of duplicate data items. Only for #MDB_DUPFIXED */
 }
 
-alias EnvInfo = MDB_envinfo;
-alias Stat = MDB_stat;
+struct EnvInfo {
+	void* mapaddr; /** Address of map, if fixed */
+	size_t mapsize; /** Size of data memory map */
+	size_t lastPage; /** ID of last used page */
+	size_t lastTxnid; /** ID of last committed transaction */
+	uint maxreaders; /** max reader slots in the environment */
+	uint numreaders; /** max reader slots used in the environment */
+}
+
+struct Stat {
+	uint psize; /** Size of a database page in bytes.
+ 					This is currently the same for all databases. */
+	uint depth; /** Depth (height) of the B-tree */
+	size_t branchPages; /** Number of internal (non-leaf) pages */
+	size_t leafPages; /** Number of leaf pages */
+	size_t overflowPages; /** Number of overflow pages */
+	size_t entries; /** Number of data items */
+}
 
 /** Create a new environment handle.
 Returns: a new environment handle
@@ -213,7 +269,8 @@ mode = the UNIX permissions to set on created files. This parameter
 is ignored on Windows.
 Returns: 0 on success, non-zero on failure.
  */
-int open(Env env, scope const char* path, uint flags = 0, ushort mode = defaultMode) @trusted
+int open(Env env, scope const char* path, EnvFlags flags = EnvFlags.none,
+	ushort mode = defaultMode) @trusted
 	=> mdb_env_open(env, path, flags, mode);
 
 /** Get environment info.
@@ -223,7 +280,7 @@ Returns: the environment info
  */
 @property EnvInfo envinfo(Env env) @trusted {
 	EnvInfo info = void;
-	check(mdb_env_info(env, &info));
+	check(mdb_env_info(env, cast(MDB_envinfo*)&info));
 	return info;
 }
 
@@ -234,7 +291,7 @@ Returns: the environment statistics
  */
 @property Stat stat(Env env) @trusted {
 	Stat info = void;
-	check(mdb_env_stat(env, &info));
+	check(mdb_env_stat(env, cast(MDB_stat*)&info));
 	return info;
 }
 
@@ -322,6 +379,16 @@ maxdbs = the maximum number of databases to allow
 	return env;
 }
 
+/** Set the size of the memory map to use for this environment.
+Params:
+env = the environment handle
+size = the size of the memory map
+ */
+@property Env mapsize(Env env, size_t size) {
+	check(mdb_env_set_mapsize(env, size));
+	return env;
+}
+
 /** Begin a transaction.
 Params:
 env = the environment handle
@@ -329,7 +396,7 @@ flags = optional transaction flags.
 parent = handle of a transaction that may be a parent of the new transaction.
 Returns: a transaction handle
  */
-Txn begin(Env env, TxnFlags flags = TxnFlags.none, Txn parent = null) @trusted {
+Txn begin(Env env, TxnFlags flags = TxnFlags.none, MDB_txn* parent = null) @trusted {
 	MDB_txn* txn = void;
 	check(mdb_txn_begin(env, parent, flags, &txn));
 	return Txn(txn);
@@ -371,15 +438,21 @@ LMDB open(Txn txn, scope const char* name, DBFlags flags = DBFlags.none) @truste
 
 /// A database handle
 struct LMDB {
-private:
-	Txn txn;
-	MDB_dbi dbi;
-public:
+	private Txn txn;
+	const MDB_dbi dbi;
+
 	/// Get the database flags.
 	@property DBFlags flags() @trusted {
 		uint flags = void;
 		check(mdb_dbi_flags(txn, dbi, &flags));
 		return cast(DBFlags)flags;
+	}
+
+	/// Get the database statistics.
+	@property Stat stat() @trusted {
+		Stat info = void;
+		check(mdb_stat(txn, dbi, cast(MDB_stat*)&info));
+		return info;
 	}
 
 	/** Get items from the database.
@@ -409,10 +482,10 @@ public:
 	}
 
 	/// Get a cursor handle.
-	@property Cursor cursor() @trusted {
+	Cursor cursor(CursorOp op = CursorOp.next) @trusted {
 		MDB_cursor* cursor = void;
 		check(mdb_cursor_open(txn, dbi, &cursor));
-		return Cursor(cursor);
+		return Cursor(cursor, op);
 	}
 
 nothrow:
@@ -424,6 +497,9 @@ nothrow:
 	Returns: 0 on success, non-zero on failure.
 	 */
 	int set(const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
+		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+	int set(Val key, Val val, WriteFlags flags = WriteFlags.none)
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/// Close the database handle.
@@ -467,5 +543,32 @@ alias close = mdb_cursor_close;
 alias maxkeysize = mdb_env_get_maxkeysize;
 
 unittest {
-	writeln("maxkeysize: ", maxkeysize(null));
+	Env env = create();
+	scope (exit)
+		close(env);
+	env.mapsize = 256 << 10;
+	env.maxdbs = 2;
+	check(env.open("./test", EnvFlags.fixedMap));
+	writeln("maxreaders: ", env.maxreaders);
+	writeln("maxkeysize: ", env.maxkeysize);
+	writeln("flags: ", env.flags);
+	writeln("envinfo: ", env.envinfo);
+	writeln("stat: ", env.stat);
+	check(env.sync());
+	Txn txn = env.begin();
+	writeln("id: ", txn.id);
+	LMDB db = txn.open("test", DBFlags.create);
+	scope (exit)
+		db.txn.abort();
+	scope (exit)
+		db.close();
+	auto key = "foo";
+	auto value = "4";
+	check(db.set(key, value));
+	txn.commit();
+	db.txn = env.begin(TxnFlags.readOnly);
+	writeln("stat: ", db.stat);
+	foreach (k, v; db.cursor()) {
+		writeln(cast(string)k, ": ", cast(string)v);
+	}
 }

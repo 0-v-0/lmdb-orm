@@ -1,7 +1,30 @@
-.dub
-*.exe
+# Compiled Object files
 *.o
+*.obj
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
 *.a
 *.lib
+
+# Executables
+*.exe
+
+# DUB
+.dub
+docs.json
+__dummy.html
+docs/
+*.redub_cache_json
+.ldc2_cache
+
+# Code coverage
+*.lst
+dub.selections.json
+
 *.pdb
-/dub.selections.json
+trace.json
