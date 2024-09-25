@@ -11,10 +11,11 @@ alias Next = void delegate();
 
 @model(metaDbName)
 private struct Meta;
-
+/// threshold for inlining arrays
+// TODO
 private enum lengthThreshold = 64;
 
-private size_t valueSize(alias filter, alias store, T)(in T value) {
+private size_t valueSize(alias filter, alias intern, T)(in T value) {
 	size_t size;
 	foreach (const ref x; value.tupleof) {
 		static if (filter!x) {
@@ -29,7 +30,7 @@ private size_t valueSize(alias filter, alias store, T)(in T value) {
 						if (x.length < lengthThreshold) // inline
 							size += size_t.sizeof + x.length * typeof(x[0]).sizeof;
 						else {
-							store(x);
+							intern(x);
 							size += Val.sizeof;
 						}
 					}
@@ -90,6 +91,25 @@ private:
 	void store(T)(in T obj) {
 		LMDB db = open!Meta();
 		check(db.set(obj));
+	}
+
+	void intern(T)(ref T[] data) {
+		LMDB db = open!Meta();
+		XXH64_hash_t seed;
+	rehash:
+		XXH64_hash_t[1] k = [xxh3_64Of(data, seed)];
+		Val key = k[];
+		Val val = data;
+		auto cursor = db.cursor();
+		int rc = cursor.set(key, val, WriteFlags.noOverwrite);
+		if (rc == MDB_KEYEXIST) {
+			if (likely(val == data))
+				return;
+			seed = k[0];
+			goto rehash;
+		}
+		check(rc);
+		check(cursor.get(key, data, CursorOp.getCurrent));
 	}
 
 public:

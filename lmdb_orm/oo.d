@@ -8,26 +8,249 @@ version (unittest) {
 	import std.stdio;
 }
 
-private struct NonNull(T) {
-	alias value this;
-	@property T value() => val;
-
-private:
-	T val;
-	this(T x)
-	in (x !is null) {
-		val = x;
-	}
-}
-
-private alias CO = MDB_cursor_op;
-
 /** -rw-r--r-- */
 enum defaultMode = octal!644;
 
-alias Env = NonNull!(MDB_env*);
-alias Txn = NonNull!(MDB_txn*);
+struct Env {
+	private MDB_env* env;
+	alias handle this;
+	@property auto handle() => env;
+
+	private this(MDB_env* e)
+	in (e !is null) {
+		env = e;
+	}
+
+	~this() {
+		close(env);
+		env = null;
+	}
+
+	@disable this(this);
+
+	/** Open an environment handle.
+	Params:
+	env = the environment handle
+	path = the directory in which the database files reside
+	flags = optional flags for this environment. This parameter is
+	a bitwise OR of the values described above.
+	mode = the UNIX permissions to set on created files. This parameter
+	is ignored on Windows.
+	Returns: 0 on success, non-zero on failure.
+	*/
+	int open(scope const char* path, EnvFlags flags = EnvFlags.none,
+		ushort mode = defaultMode) @trusted
+		=> mdb_env_open(env, path, flags, mode);
+
+	/** Begin a transaction.
+	Params:
+	env = the environment handle
+	flags = optional transaction flags.
+	parent = handle of a transaction that may be a parent of the new transaction.
+	Returns: a transaction handle
+	*/
+	Txn begin(TxnFlags flags = TxnFlags.none, MDB_txn* parent = null) @trusted {
+		MDB_txn* txn = void;
+		check(mdb_txn_begin(env, parent, flags, &txn));
+		return Txn(txn);
+	}
+
+	/** Flush the data buffers to disk.
+	Params:
+	env = the environment handle
+	force = if non-zero, force a synchronous flush
+	Returns: 0 on success, non-zero on failure.
+	*/
+	int sync(bool force = false)
+	@trusted => mdb_env_sync(env, force);
+
+	/** Copy an LMDB environment to the specified path.
+	Params:
+	env = the environment handle
+	path = the path to which the environment should be copied
+	flags = optional flags for this operation. This parameter is unused and
+	must be set to 0.
+	Returns: 0 on success, non-zero on failure.
+	*/
+	int copy(scope const char* path)
+	@trusted => mdb_env_copy(env, path);
+
+	/// ditto
+	int copy(scope const char* path, bool compact)
+	@trusted => mdb_env_copy2(env, path, compact);
+
+	/// ditto
+	int copy(FileHandle fd)
+	@trusted => mdb_env_copyfd(env, fd);
+
+	/// ditto
+	int copy(FileHandle fd, bool compact)
+	@trusted => mdb_env_copyfd2(env, fd, compact);
+
+	/** Check for stale entries in the reader lock table.
+	Params:
+	env = the environment handle
+	Returns: number of stale slots that were cleared
+	*/
+	int readerCheck() @trusted {
+		int dead = void;
+		check(mdb_reader_check(env, &dead));
+		return dead;
+	}
+
+@property:
+
+	/** Get environment info.
+	Params:
+	env = the environment handle
+	Returns: the environment info
+	*/
+	EnvInfo envinfo() @trusted {
+		EnvInfo info = void;
+		check(mdb_env_info(env, cast(MDB_envinfo*)&info));
+		return info;
+	}
+
+	/** Get environment statistics.
+	Params:
+	env = the environment handle
+	Returns: the environment statistics
+	*/
+	Stat stat() @trusted {
+		Stat info = void;
+		check(mdb_env_stat(env, cast(MDB_stat*)&info));
+		return info;
+	}
+
+	/** Get environment flags.
+	Params:
+	env = the environment handle
+	Returns: the environment flags
+	*/
+	uint flags() @trusted {
+		uint flags = void;
+		check(mdb_env_get_flags(env, &flags));
+		return flags;
+	}
+
+	/** Get the path of the environment.
+	Params:
+	env = the environment handle
+	Returns: the path
+	*/
+	string path() @trusted {
+		char* path = void;
+		check(mdb_env_get_path(env, &path));
+		return cast(string)fromStringz(path);
+	}
+
+	/** Get the file descriptor for the environment.
+	Params:
+	env = the environment handle
+	Returns: the file descriptor
+	*/
+	auto fd() @trusted {
+		FileHandle fd = void;
+		check(mdb_env_get_fd(env, &fd));
+		return fd;
+	}
+
+	/** Get the maximum number of threads for the environment.
+	Params:
+	env = the environment handle
+	Returns: the maximum number of threads allowed
+	*/
+	uint maxreaders() @trusted {
+		uint readers = void;
+		check(mdb_env_get_maxreaders(env, &readers));
+		return readers;
+	}
+
+	/** Set the maximum number of threads for the environment.
+	Params:
+	env = the environment handle
+	readers = the maximum number of threads to allow
+	*/
+	ref maxreaders(uint readers) {
+		check(mdb_env_set_maxreaders(env, readers));
+		return this;
+	}
+
+	/** Set the maximum number of databases for the environment.
+	Params:
+	env = the environment handle
+	maxdbs = the maximum number of databases to allow
+	*/
+	ref maxdbs(uint maxdbs) {
+		check(mdb_env_set_maxdbs(env, maxdbs));
+		return this;
+	}
+
+	/** Set the size of the memory map to use for this environment.
+	Params:
+	env = the environment handle
+	size = the size of the memory map
+	*/
+	ref mapsize(size_t size) {
+		check(mdb_env_set_mapsize(env, size));
+		return this;
+	}
+}
+
+struct Txn {
+	private MDB_txn* txn;
+
+	alias handle this;
+	@property auto handle() => txn;
+
+	private this(MDB_txn* t)
+	in (t !is null) {
+		txn = t;
+	}
+
+	~this() @trusted {
+		//abort(txn);
+		//txn = null;
+	}
+
+	@disable this(this);
+
+	/** Open a database in the environment.
+	Params:
+	txn = a transaction handle returned by #mdb_txn_begin
+	name = the name of the database to open.
+	flags = optional flags for this database.
+	Returns: a database handle
+	*/
+	LMDB open(scope const char* name, DBFlags flags = DBFlags.none) @trusted {
+		MDB_dbi dbi = void;
+		check(mdb_dbi_open(txn, name, flags, &dbi));
+		return LMDB(dbi, txn);
+	}
+
+	/** Begin a transaction within the current transaction.
+	Params:
+	flags = optional transaction flags.
+	Returns: a transaction handle
+	*/
+	Txn begin(TxnFlags flags = TxnFlags.none) @trusted {
+		MDB_txn* t = void;
+		check(mdb_txn_begin(txn.env, txn, flags, &t));
+		return Txn(t);
+	}
+
+	/** Commit a transaction. */
+	void commit() @trusted {
+		check(mdb_txn_commit(txn));
+		txn = null;
+	}
+}
+
 alias Val = const(void)[];
+
+alias FileHandle = mdb_filehandle_t;
+
+private alias CO = MDB_cursor_op;
 private enum opOffset = MDB_LAST_ERRCODE + 1;
 
 struct Cursor {
@@ -44,6 +267,12 @@ struct Cursor {
 		rc = cast(int)op + opOffset;
 	}
 
+	~this() @trusted {
+		close(cursor);
+	}
+
+	@disable this(this);
+
 	void popFront() @trusted {
 		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.next);
 	}
@@ -52,17 +281,35 @@ struct Cursor {
 		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.prev);
 	}
 
-	/// Retrieve by cursor.
-	int get(ref Val key, ref Val val, CursorOp op = CursorOp.next)
-		=> mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, op);
+	pragma(inline, true) {
+		/// Retrieve by cursor.
+		int get(T, U)(ref T[] key, ref U[] val, CursorOp op = CursorOp.next)
+			=> mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, op);
 
-	/// Store by cursor.
-	int set(const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
-		=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+		/// ditto
+		int get(T, U)(in T[] key, ref U[] val, CursorOp op = CursorOp.next)
+			=> mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, op);
 
-	/// Delete by cursor.
-	int del(DeleteFlags flags = DeleteFlags.none)
-		=> mdb_cursor_del(cursor, flags);
+		/// Store by cursor.
+		int set(T, U)(in T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+		/// ditto
+		int set(T, U)(ref T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+		/// ditto
+		int set(T, U)(in ref T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+		/// ditto
+		int set(T, U)(in ref T[] key, in ref U[] val, WriteFlags flags = WriteFlags.none)
+			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+
+		/// Delete by cursor.
+		int del(DeleteFlags flags = DeleteFlags.none)
+			=> mdb_cursor_del(cursor, flags);
+	}
 
 @property:
 	/// Return count of duplicates for current key.
@@ -73,8 +320,8 @@ struct Cursor {
 	}
 
 	/// Return the cursor's database handle.
-	LMDB dbi() @trusted
-		=> LMDB(Txn(cursor.txn), mdb_cursor_dbi(cursor));
+	auto dbi() @trusted
+		=> mdb_cursor_dbi(cursor);
 
 	bool empty() @trusted {
 		if (opOffset <= rc && rc <= opOffset + CursorOp.max)
@@ -140,7 +387,7 @@ void check(string origin = __FUNCTION__)(int rc) {
 	import std.conv : text;
 
 	if (rc) {
-		auto msg = origin ~ ": " ~ errorString(rc) ~ text(" (", rc, ")");
+		auto msg = text(origin ~ ": ", errorString(rc), " (", rc, ")");
 		throw new MbdError(msg);
 	}
 }
@@ -291,221 +538,35 @@ env = the environment handle
  */
 alias close = mdb_env_close;
 
-/** Open an environment handle.
-Params:
-env = the environment handle
-path = the directory in which the database files reside
-flags = optional flags for this environment. This parameter is
-a bitwise OR of the values described above.
-mode = the UNIX permissions to set on created files. This parameter
-is ignored on Windows.
-Returns: 0 on success, non-zero on failure.
- */
-int open(Env env, scope const char* path, EnvFlags flags = EnvFlags.none,
-	ushort mode = defaultMode) @trusted
-	=> mdb_env_open(env, path, flags, mode);
-
-/** Get environment info.
-Params:
-env = the environment handle
-Returns: the environment info
- */
-@property EnvInfo envinfo(Env env) @trusted {
-	EnvInfo info = void;
-	check(mdb_env_info(env, cast(MDB_envinfo*)&info));
-	return info;
-}
-
-/** Get environment statistics.
-Params:
-env = the environment handle
-Returns: the environment statistics
- */
-@property Stat stat(Env env) @trusted {
-	Stat info = void;
-	check(mdb_env_stat(env, cast(MDB_stat*)&info));
-	return info;
-}
-
-/** Get environment flags.
-Params:
-env = the environment handle
-Returns: the environment flags
- */
-@property uint flags(Env env) @trusted {
-	uint flags = void;
-	check(mdb_env_get_flags(env, &flags));
-	return flags;
-}
-
-/** Get the path of the environment.
-Params:
-env = the environment handle
-Returns: the path
- */
-@property string path(Env env) @trusted {
-	char* path = void;
-	check(mdb_env_get_path(env, &path));
-	return cast(string)fromStringz(path);
-}
-
-/** Get the file descriptor for the environment.
-Params:
-env = the environment handle
-Returns: the file descriptor
- */
-@property auto fd(Env env) @trusted {
-	FileHandle fd = void;
-	check(mdb_env_get_fd(env, &fd));
-	return fd;
-}
-
-/** Copy an LMDB environment to the specified path.
-Params:
-env = the environment handle
-path = the path to which the environment should be copied
-flags = optional flags for this operation. This parameter is unused and
-must be set to 0.
-Returns: 0 on success, non-zero on failure.
- */
-alias copy = mdb_env_copy;
-
-/// ditto
-int copy(Env env, scope const char* path, bool compact)
-	=> mdb_env_copy2(env, path, compact);
-
-alias FileHandle = mdb_filehandle_t;
-
-/// ditto
-int copy(Env env, FileHandle fd)
-	=> mdb_env_copyfd(env, fd);
-
-/// ditto
-int copy(Env env, FileHandle fd, bool compact)
-	=> mdb_env_copyfd2(env, fd, compact);
-
-/** Flush the data buffers to disk.
-Params:
-env = the environment handle
-force = if non-zero, force a synchronous flush
-Returns: 0 on success, non-zero on failure.
- */
-int sync(Env env, bool force = false)
-	=> mdb_env_sync(env, force);
-
 /// Get/set the application information
 alias userctx = mdb_env_get_userctx;
 
 /// ditto
-@property Env userctx(Env env, void* ctx) {
+@property ref userctx(ref Env env, void* ctx) {
 	check(mdb_env_set_userctx(env, ctx));
 	return env;
-}
-
-/** Get the maximum number of threads for the environment.
-Params:
-env = the environment handle
-Returns: the maximum number of threads allowed
- */
-@property uint maxreaders(Env env) @trusted {
-	uint readers = void;
-	check(mdb_env_get_maxreaders(env, &readers));
-	return readers;
-}
-
-/** Set the maximum number of threads for the environment.
-Params:
-env = the environment handle
-readers = the maximum number of threads to allow
- */
-@property Env maxreaders(Env env, uint readers) {
-	check(mdb_env_set_maxreaders(env, readers));
-	return env;
-}
-
-/** Set the maximum number of databases for the environment.
-Params:
-env = the environment handle
-maxdbs = the maximum number of databases to allow
- */
-@property Env maxdbs(Env env, uint maxdbs) {
-	check(mdb_env_set_maxdbs(env, maxdbs));
-	return env;
-}
-
-/** Set the size of the memory map to use for this environment.
-Params:
-env = the environment handle
-size = the size of the memory map
- */
-@property Env mapsize(Env env, size_t size) {
-	check(mdb_env_set_mapsize(env, size));
-	return env;
-}
-
-/** Check for stale entries in the reader lock table.
-Params:
-env = the environment handle
-Returns: dead Number of stale slots that were cleared
- */
-int readerCheck(Env env) @trusted {
-	int dead = void;
-	check(mdb_reader_check(env, &dead));
-	return dead;
-}
-
-/** Begin a transaction.
-Params:
-env = the environment handle
-flags = optional transaction flags.
-parent = handle of a transaction that may be a parent of the new transaction.
-Returns: a transaction handle
- */
-Txn begin(Env env, TxnFlags flags = TxnFlags.none, MDB_txn* parent = null) @trusted {
-	MDB_txn* txn = void;
-	check(mdb_txn_begin(env, parent, flags, &txn));
-	return Txn(txn);
-}
-
-/** Begin a transaction.
-Params:
-parent = handle of a transaction that may be a parent of the new transaction.
-flags = optional transaction flags.
-Returns: a transaction handle
- */
-Txn begin(Txn parent, TxnFlags flags = TxnFlags.none) @trusted {
-	MDB_txn* txn = void;
-	check(mdb_txn_begin(parent.env, parent, flags, &txn));
-	return Txn(txn);
 }
 
 alias env = mdb_txn_env;
 
 alias id = mdb_txn_id;
 
-alias commit = mdb_txn_commit;
 alias abort = mdb_txn_abort;
 alias reset = mdb_txn_reset;
 alias renew = mdb_txn_renew;
 
-/** Open a database in the environment.
-Params:
-txn = a transaction handle returned by #mdb_txn_begin
-name = the name of the database to open.
-flags = optional flags for this database.
-Returns: a database handle
- */
-LMDB open(Txn txn, scope const char* name, DBFlags flags = DBFlags.none) @trusted {
-	MDB_dbi dbi = void;
-	check(mdb_dbi_open(txn, name, flags, &dbi));
-	return LMDB(txn, dbi);
-}
-
 /// A database handle
 struct LMDB {
-	package Txn txn;
 	/// The database handle
 	const MDB_dbi dbi;
+
+	package MDB_txn* txn;
+
+	~this() @trusted {
+		close();
+	}
+
+	@disable this(this);
 
 	/// Get the database flags.
 	@property DBFlags flags() @trusted {
@@ -566,8 +627,8 @@ nothrow:
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/// ditto
-	int set(in Val key, in Val val, WriteFlags flags = WriteFlags.none)
-		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+	//int set(in Val key, in Val val, WriteFlags flags = WriteFlags.none)
+	//	=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/** Delete items from the database.
 	Params:
@@ -614,11 +675,9 @@ alias maxkeysize = mdb_env_get_maxkeysize;
 
 unittest {
 	Env env = create();
-	scope (exit)
-		close(env);
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.noSubdir | EnvFlags.writeMap));
+	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);
@@ -629,13 +688,16 @@ unittest {
 	writeln("id: ", txn.id);
 	LMDB db = txn.open("test", DBFlags.create);
 	writeln("dbi: ", db.dbi);
-	scope (exit)
-		db.txn.abort();
-	scope (exit)
-		db.close();
-	auto key = "foo";
-	auto value = "3";
-	check(db.set(key, value));
+	const(void)[] key = "foo";
+	const(void)[] value = "3";
+	debug writeln(key, ": ", value.ptr, value);
+	auto cursor = db.cursor();
+	int rc = cursor.set(key, value, WriteFlags.noOverwrite);
+	if (rc != MDB_KEYEXIST) {
+		check(rc);
+		check(cursor.get(key, value, CursorOp.getCurrent));
+	}
+	debug writeln(rc, " ", key, key.ptr, ": ", value.ptr, value);
 	txn.commit();
 	db.txn = env.begin(TxnFlags.readOnly);
 	writeln("stat: ", db.stat);
@@ -643,4 +705,5 @@ unittest {
 		writeln(cast(string)k, ": ", cast(string)v);
 		writeln(k.ptr, ": ", v.ptr);
 	}
+	writeln("stale slots: ", env.readerCheck());
 }

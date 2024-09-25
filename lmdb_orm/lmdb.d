@@ -741,7 +741,7 @@ int mdb_env_sync(MDB_env* env, int force);
  * The environment handle will be freed and must not be used again after this call.
  * @param[in] env An environment handle returned by #mdb_env_create()
  */
-void mdb_env_close(MDB_env* env);
+void mdb_env_close(MDB_env* env) @trusted;
 
 /** @brief Set environment flags.
  *
@@ -893,7 +893,7 @@ int mdb_env_set_maxdbs(MDB_env* env, MDB_dbi dbs);
  * @param[in] env An environment handle returned by #mdb_env_create()
  * @return The maximum size of a key we can write
  */
-int mdb_env_get_maxkeysize(MDB_env* env);
+int mdb_env_get_maxkeysize(MDB_env* env) @trusted;
 
 /** @brief Set application information associated with the #MDB_env.
  *
@@ -901,14 +901,14 @@ int mdb_env_get_maxkeysize(MDB_env* env);
  * @param[in] ctx An arbitrary pointer for whatever the application needs.
  * @return A non-zero error value on failure and 0 on success.
  */
-int mdb_env_set_userctx(MDB_env* env, void* ctx);
+int mdb_env_set_userctx(MDB_env* env, void* ctx) @trusted;
 
 /** @brief Get the application information associated with the #MDB_env.
  *
  * @param[in] env An environment handle returned by #mdb_env_create()
  * @return The pointer set by #mdb_env_set_userctx().
  */
-void* mdb_env_get_userctx(MDB_env* env);
+void* mdb_env_get_userctx(MDB_env* env) @trusted;
 
 /** @brief A callback function for most LMDB assert() failures,
  * called before printing the message and aborting.
@@ -1411,7 +1411,7 @@ MDB_txn* mdb_cursor_txn(MDB_cursor* cursor);
  *
  * @param[in] cursor A cursor handle returned by #mdb_cursor_open()
  */
-MDB_dbi mdb_cursor_dbi(MDB_cursor* cursor);
+MDB_dbi mdb_cursor_dbi(MDB_cursor* cursor) @trusted;
 
 /** @brief Retrieve by cursor.
  *

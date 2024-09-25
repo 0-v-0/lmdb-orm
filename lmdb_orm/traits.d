@@ -87,3 +87,21 @@ template getSymbolsWith(alias attr, symbols...) {
 				getSymbolsWith = AliasSeq!(getSymbolsWith, __traits(getMember, symbol, name));
 	}
 }
+
+bool likely(bool exp) {
+	version (LDC) {
+		import ldc.intrinsics;
+
+		return llvm_expect(exp, true);
+	} else
+		return exp;
+}
+
+bool unlikely(bool exp) {
+	version (LDC) {
+		import ldc.intrinsics;
+
+		return llvm_expect(exp, false);
+	} else
+		return exp;
+}
