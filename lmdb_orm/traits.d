@@ -43,9 +43,68 @@ template foreign(alias field) {
 
 alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
 
-package(lmdb_orm):
-enum isPOD(T) = __traits(isPOD, T);
 enum isPK(alias x) = hasUDA!(x, PK);
+
+package(lmdb_orm):
+
+/// threshold for inlining arrays, default 64
+// TODO
+enum lengthThreshold = size_t.max;
+
+/// Get the size of the serialized object, 0 if it is dynamic
+size_t byteLen(T, alias filter = True)() {
+	size_t size;
+	foreach (alias x; T.tupleof) {
+		static if (filter!x) {
+			static if (isArray!(typeof(x))) {
+				static assert(!hasIndirections!(typeof(x[0])), "not implemented");
+				static if (isDynamicArray!(typeof(x))) {
+					return 0;
+				} else {
+					size += x.length * typeof(x[0]).sizeof;
+				}
+			} else
+				size += x.sizeof;
+		}
+	}
+	return size;
+}
+
+unittest {
+	import lmdb_orm.orm;
+
+	static assert(byteLen!(User) == 0);
+	static assert(byteLen!(Company) == 0);
+	static assert(byteLen!(Relation) == 8 + 8 + 4);
+	static assert(byteLen!(Relation, isPK) == 8 + 8);
+}
+
+/// Get the size of the serialized object
+size_t byteLen(alias filter, alias intern, T)(ref T obj) {
+	size_t size;
+	foreach (ref x; obj.tupleof) {
+		static if (filter!x) {
+			static if (isArray!(typeof(x))) {
+				static assert(!hasIndirections!(typeof(x[0])), "not implemented");
+				static if (isStaticArray!(typeof(x))) {
+					size += x.length * typeof(x[0]).sizeof;
+				} else {
+					if (x.length < lengthThreshold) // inline
+						size += size_t.sizeof + x.length * typeof(x[0]).sizeof;
+					else {
+						intern(x);
+						size += Val.sizeof;
+					}
+				}
+			} else
+				size += x.sizeof;
+		}
+	}
+	return size;
+}
+
+enum True(alias x) = true;
+enum isPOD(T) = __traits(isPOD, T);
 
 template getUDA(alias sym, T) {
 	static foreach (uda; __traits(getAttributes, sym))

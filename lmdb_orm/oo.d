@@ -209,8 +209,8 @@ struct Txn {
 	}
 
 	~this() @trusted {
-		//abort(txn);
-		//txn = null;
+		if (txn)
+			commit();
 	}
 
 	@disable this(this);
@@ -225,7 +225,7 @@ struct Txn {
 	LMDB open(scope const char* name, DBFlags flags = DBFlags.none) @trusted {
 		MDB_dbi dbi = void;
 		check(mdb_dbi_open(txn, name, flags, &dbi));
-		return LMDB(dbi, txn);
+		return LMDB(dbi, this);
 	}
 
 	/** Begin a transaction within the current transaction.
@@ -559,8 +559,13 @@ alias renew = mdb_txn_renew;
 struct LMDB {
 	/// The database handle
 	const MDB_dbi dbi;
+	private Txn* _txn;
 
-	package MDB_txn* txn;
+	private this(MDB_dbi i, ref Txn t)
+	in (t !is null) {
+		dbi = i;
+		_txn = &t;
+	}
 
 	~this() @trusted {
 		close();
@@ -568,18 +573,28 @@ struct LMDB {
 
 	@disable this(this);
 
-	/// Get the database flags.
-	@property DBFlags flags() @trusted {
-		uint flags = void;
-		check(mdb_dbi_flags(txn, dbi, &flags));
-		return cast(DBFlags)flags;
-	}
+	@property {
+		/// The transaction handle
+		ref txn() => *_txn;
 
-	/// Get the database statistics.
-	@property Stat stat() @trusted {
-		Stat info = void;
-		check(mdb_stat(txn, dbi, cast(MDB_stat*)&info));
-		return info;
+		/// ditto
+		void txn(ref Txn t) {
+			_txn = &t;
+		}
+
+		/// Get the database flags.
+		DBFlags flags() @trusted {
+			uint flags = void;
+			check(mdb_dbi_flags(txn, dbi, &flags));
+			return cast(DBFlags)flags;
+		}
+
+		/// Get the database statistics.
+		Stat stat() @trusted {
+			Stat info = void;
+			check(mdb_stat(txn, dbi, cast(MDB_stat*)&info));
+			return info;
+		}
 	}
 
 	/** Get items from the database.
@@ -623,7 +638,7 @@ nothrow:
 		flags = optional flags for this operation.
 	Returns: 0 on success, non-zero on failure.
 	 */
-	int set(const ref Val key, const ref Val val, WriteFlags flags = WriteFlags.none)
+	int set(in ref Val key, in ref Val val, WriteFlags flags = WriteFlags.none)
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/// ditto
@@ -677,7 +692,7 @@ unittest {
 	Env env = create();
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap));
+	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap | EnvFlags.noSubdir));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);
@@ -690,14 +705,12 @@ unittest {
 	writeln("dbi: ", db.dbi);
 	const(void)[] key = "foo";
 	const(void)[] value = "3";
-	debug writeln(key, ": ", value.ptr, value);
-	auto cursor = db.cursor();
-	int rc = cursor.set(key, value, WriteFlags.noOverwrite);
+	debug writeln(cast(string)key, ": ", value.ptr, " ", cast(string)value);
+	int rc = db.set(key, value, WriteFlags.noOverwrite | WriteFlags.reserve);
 	if (rc != MDB_KEYEXIST) {
 		check(rc);
-		check(cursor.get(key, value, CursorOp.getCurrent));
 	}
-	debug writeln(rc, " ", key, key.ptr, ": ", value.ptr, value);
+	debug writeln(rc, " ", cast(string)key, key.ptr, ": ", value.ptr, " ", cast(string)value);
 	txn.commit();
 	db.txn = env.begin(TxnFlags.readOnly);
 	writeln("stat: ", db.stat);

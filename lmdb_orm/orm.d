@@ -1,46 +1,18 @@
 module lmdb_orm.orm;
 
+import lmdb_orm.lmdb : MDB_val, MDB_KEYEXIST;
 import lmdb_orm.oo;
 import lmdb_orm.traits;
 import std.meta;
 import std.traits;
 
 import core.stdc.stdlib;
+import core.stdc.string;
 
 alias Next = void delegate();
 
 @model(metaDbName)
 private struct Meta;
-/// threshold for inlining arrays
-// TODO
-private enum lengthThreshold = 64;
-
-private size_t valueSize(alias filter, alias intern, T)(in T value) {
-	size_t size;
-	foreach (const ref x; value.tupleof) {
-		static if (filter!x) {
-			static if (isArray!(typeof(x))) {
-				static if (hasIndirections!(typeof(x[0]))) {
-					foreach (const ref y; x)
-						size += valueSize!filter(y);
-				} else {
-					static if (isStaticArray!(typeof(x))) {
-						size += x.length * typeof(x[0]).sizeof;
-					} else {
-						if (x.length < lengthThreshold) // inline
-							size += size_t.sizeof + x.length * typeof(x[0]).sizeof;
-						else {
-							intern(x);
-							size += Val.sizeof;
-						}
-					}
-				}
-			} else
-				size += x.sizeof;
-		}
-	}
-	return size;
-}
 
 /// name of the meta database
 enum metaDbName = "#meta";
@@ -50,24 +22,24 @@ enum metaDbName = "#meta";
 struct FSDB(modules...) {
 	alias Tables = getTables!modules;
 	/// Maximum number of databases for the environment
-	enum maxdbs = _Tables.length;
+	enum maxdbs = DBs.length;
 private:
-	alias _Tables = AliasSeq!(Meta, Tables);
+	alias DBs = AliasSeq!(Meta, Tables);
 	Env e;
 	LMDB[maxdbs] dbs;
 
-	enum indexOf(T) = staticIndexOf!(T, _Tables);
+	enum indexOf(T) = staticIndexOf!(T, DBs);
 	enum err = verifyTables();
 	static assert(err == null, err);
 
 	string verifyTables() {
 		if (__ctfe) {
 			size_t[string] indices;
-			foreach (i, T; _Tables) {
+			foreach (i, T; DBs) {
 				auto name = dbNameOf!T;
 				if (name in indices)
 					return "Table " ~ T.stringof ~ " has the same name as " ~
-						_Tables[indices[name]].stringof;
+						DBs[indices[name]].stringof;
 				indices[name] = i;
 			}
 		}
@@ -103,13 +75,56 @@ private:
 		auto cursor = db.cursor();
 		int rc = cursor.set(key, val, WriteFlags.noOverwrite);
 		if (rc == MDB_KEYEXIST) {
-			if (likely(val == data))
+			if (likely(val == data)) {
+				data = val;
 				return;
+			}
 			seed = k[0];
 			goto rehash;
 		}
 		check(rc);
 		check(cursor.get(key, data, CursorOp.getCurrent));
+	}
+
+	template serialize(alias obj, alias filter) {
+		static if (is(typeof(p) == void)) {
+			enum L = byteLen!(T, filter);
+			static if (L) {
+				enum keyLen = L;
+				ubyte[L] buf = void;
+				auto p = buf.ptr;
+				// TODO: optimize for continuous key
+			} else {
+				const keyLen = byteLen!(filter, intern, T)(obj);
+				auto p = cast(ubyte*)alloca(keyLen);
+			}
+		}
+		auto bytes = {
+			size_t i;
+			foreach (ref x; obj.tupleof) {
+				static if (filter!x) {
+					alias U = typeof(x);
+					static if (isArray!U) {
+						static assert(!hasIndirections!(typeof(x[0])), "not implemented");
+						static if (isDynamicArray!U) {
+							if (x.length < lengthThreshold) { // inline
+								// TODO: handle unaligned loads
+								*cast(size_t*)(p + i) = x.length;
+								i += size_t.sizeof;
+								auto len = x.length * typeof(x[0]).sizeof;
+								memcpy(p + i, x.ptr, len);
+								i += len;
+								continue;
+							}
+						}
+					}
+					*cast(Unqual!U*)(p + i) = x;
+					i += U.sizeof;
+				}
+			}
+			assert(i == keyLen);
+			return p[0 .. i];
+		}();
 	}
 
 public:
@@ -134,9 +149,41 @@ public:
 		check(e.open(path, flags, mode));
 	}
 
-	void save(T)(in T obj) {
+	void save(T)(in T obj) @trusted {
+		union U {
+			Val v;
+			MDB_val m;
+		}
+		alias filter = templateNot!isPK;
+
+		U u;
 		LMDB db = open!T();
-		check(db.set(obj));
+		{
+			mixin serialize!(obj, isPK);
+			enum size = byteLen!(T, filter);
+			static if (size) {
+				u.m.mv_size = size;
+			} else {
+				u.m.mv_size = byteLen!(filter, intern, T)(obj);
+			}
+
+			int rc = db.set(bytes, u.v, WriteFlags.noOverwrite | WriteFlags.reserve);
+			if (rc == MDB_KEYEXIST) {
+				rc = db.set(bytes, u.v, WriteFlags.reserve);
+			}
+			check(rc);
+		}
+		{
+			auto p = u.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
+			mixin serialize!(obj, filter);
+		}
+	}
+
+	void del(T)(in T obj) {
+		LMDB db = open!T();
+		mixin serialize!(obj, isPK);
+		check(db.del(bytes));
+		// TODO: implement cascade delete
 	}
 }
 
