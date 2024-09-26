@@ -9,4 +9,5 @@ A simple ORM for lmdb
 
 ## TODO
 - [ ] Index
+- [ ] cascade delete
 - [ ] vacuum

@@ -10,9 +10,53 @@ import core.stdc.stdlib;
 import core.stdc.string;
 
 alias Next = void delegate();
-
+private:
 @model(metaDbName)
-private struct Meta;
+struct Meta;
+
+template Index(string name) {
+	@model(name)
+	struct Index {
+		@PK Val key;
+		Val val;
+	}
+}
+
+template UniqueIndices(Tables...) {
+	alias UniqueIndices = AliasSeq!();
+	static foreach (T; Tables) {
+		static foreach (alias x; T.tupleof) {
+			static if (getName!(x, unique)) {
+				UniqueIndices = AliasSeq!(UniqueIndices,
+					Index!(dbNameOf!T ~ "." ~ getName!(x, unique)));
+			}
+		}
+	}
+}
+
+string checkDBs(DBs...)() {
+	if (__ctfe) {
+		enum nameOf(T) = T.stringof;
+
+		size_t[string] indices;
+		foreach (i, T; DBs) {
+			enum name = dbNameOf!T;
+			if (name in indices)
+				return "Table " ~ T.stringof ~ " has the same name as " ~
+					[staticMap!(nameOf, DBs)][indices[name]];
+			indices[name] = i;
+		}
+	}
+	return null;
+}
+
+union Arr {
+	Val v;
+	MDB_val m;
+}
+
+@property ref mark(MDB_val m)
+	=> (cast(ubyte*)m.mv_data)[m.mv_size - 1];
 
 /// name of the meta database
 enum metaDbName = "#meta";
@@ -24,33 +68,40 @@ struct FSDB(modules...) {
 	/// Maximum number of databases for the environment
 	enum maxdbs = DBs.length;
 private:
-	alias DBs = AliasSeq!(Meta, Tables);
+	alias DBs = AliasSeq!(Meta, Tables, UniqueIndices!Tables);
 	Env e;
 	LMDB[maxdbs] dbs;
 
 	enum indexOf(T) = staticIndexOf!(T, DBs);
-	enum err = verifyTables();
+	enum err = checkDBs!DBs;
 	static assert(err == null, err);
 
-	string verifyTables() {
-		if (__ctfe) {
-			size_t[string] indices;
-			foreach (i, T; DBs) {
-				auto name = dbNameOf!T;
-				if (name in indices)
-					return "Table " ~ T.stringof ~ " has the same name as " ~
-						DBs[indices[name]].stringof;
-				indices[name] = i;
-			}
-		}
-		return null;
-	}
-
 	void buildIndex(T)() {
-
 	}
 
 	void vacuum() {
+		foreach (i; 1 .. maxdbs) {
+			LMDB db = dbs[i];
+			if (db.txn) {
+				db.txn.commit();
+				db.txn = null;
+			}
+			if (db.dbi) {
+				db.close();
+				db.dbi = null;
+			}
+		}
+	}
+
+	void onUpdate(T)(ref T obj) {
+		// TODO: check foreign key constraints
+		// TODO: check unique constraints
+		foreach (alias x; obj.tupleof) {
+			static if (hasUDA!(x, nonEmpty)) {
+				if (x == typeof(x).init)
+					throw new Exception("Column " ~ x.stringof ~ " cannot be empty");
+			}
+		}
 	}
 
 	LMDB open(T)() {
@@ -63,21 +114,52 @@ private:
 		return db;
 	}
 
-	void store(T)(in T obj) {
-		LMDB db = open!Meta();
-		check(db.set(obj));
+	LMDB open(T)(ref Txn txn) {
+		static assert(indexOf!T > -1, "Table " ~ T.stringof ~ " not found");
+		LMDB db = dbs[indexOf!T];
+		if (!db.dbi)
+			db.dbi = txn.open(dbNameOf!T, DBFlags.create);
+		return db;
 	}
 
-	void intern(T)(ref T[] data) {
+	void store(T)(ref T obj) {
+		alias filter = templateNot!isPK;
+
+		Arr a;
+		LMDB db = open!T();
+		{
+			mixin serialize!(obj, isPK);
+			enum size = byteLen!(T, filter);
+			static if (size) {
+				a.m.mv_size = size;
+			} else {
+				a.m.mv_size = byteLen!(filter, intern, T)(obj);
+			}
+
+			int rc = db.set(bytes, a.v, WriteFlags.noOverwrite | WriteFlags.reserve);
+			if (rc == MDB_KEYEXIST) {
+				rc = db.set(bytes, a.v, WriteFlags.reserve);
+			}
+			check(rc);
+		}
+		{
+			auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
+			mixin serialize!(obj, filter);
+		}
+	}
+
+	void intern(T)(ref T[] data) @trusted {
 		LMDB db = open!Meta();
 		XXH64_hash_t seed;
 	rehash:
 		XXH64_hash_t[1] k = [xxh3_64Of(data, seed)];
 		Val key = k[];
-		Val val = data;
+		Arr a = data;
+		a.m.mv_size++;
 		auto cursor = db.cursor();
-		int rc = cursor.set(key, val, WriteFlags.noOverwrite);
+		int rc = cursor.set(key, a.v, WriteFlags.noOverwrite | WriteFlags.reserve);
 		if (rc == MDB_KEYEXIST) {
+			Val val = a.v[0 .. data.length];
 			if (likely(val == data)) {
 				data = val;
 				return;
@@ -86,7 +168,9 @@ private:
 			goto rehash;
 		}
 		check(rc);
-		check(cursor.get(key, data, CursorOp.getCurrent));
+		memcpy(a.m.mv_data, data.ptr, data.length);
+		a.m.mark = 0;
+		data = cast(T[])a.m.mv_data[0 .. data.length];
 	}
 
 	template serialize(alias obj, alias filter) {
@@ -131,8 +215,20 @@ private:
 	}
 
 public:
-	@property auto env() => e;
+	@property ref env() => e;
 	alias env this;
+
+	this(size_t size) {
+		e = create();
+		e.mapsize = size;
+		e.maxdbs = maxdbs;
+	}
+
+	~this() @trusted {
+		close(env);
+	}
+
+	@disable this(this);
 
 	void open(in char[] path, EnvFlags flags = EnvFlags.none, ushort mode = defaultMode) {
 		auto cpath = cast(char*)alloca(path.length + 1);
@@ -153,33 +249,6 @@ public:
 	}
 
 	void save(T)(in T obj) @trusted {
-		union U {
-			Val v;
-			MDB_val m;
-		}
-		alias filter = templateNot!isPK;
-
-		U u;
-		LMDB db = open!T();
-		{
-			mixin serialize!(obj, isPK);
-			enum size = byteLen!(T, filter);
-			static if (size) {
-				u.m.mv_size = size;
-			} else {
-				u.m.mv_size = byteLen!(filter, intern, T)(obj);
-			}
-
-			int rc = db.set(bytes, u.v, WriteFlags.noOverwrite | WriteFlags.reserve);
-			if (rc == MDB_KEYEXIST) {
-				rc = db.set(bytes, u.v, WriteFlags.reserve);
-			}
-			check(rc);
-		}
-		{
-			auto p = u.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-			mixin serialize!(obj, filter);
-		}
 	}
 
 	void del(T)(in T obj) {
@@ -263,11 +332,9 @@ version (unittest) {
 	}
 }
 
-version (none) unittest {
+unittest {
 	alias modules = AliasSeq!(lmdb_orm.orm);
-	FSDB!modules db;
-	env.mapsize = 256 << 10;
-	env.maxdbs = 2;
+	auto db = FSDB!modules(256 << 10);
 	db.open("./test", EnvFlags.fixedMap | EnvFlags.noSubdir | EnvFlags.writeMap);
 	writeln("maxreaders: ", db.maxreaders);
 	writeln("maxkeysize: ", db.maxkeysize);
@@ -275,18 +342,13 @@ version (none) unittest {
 	writeln("envinfo: ", db.envinfo);
 	writeln("stat: ", db.stat);
 	check(db.sync());
-	Txn txn = env.begin();
+	Txn txn = db.begin();
 	writeln("id: ", txn.id);
-	LMDB db = txn.open("test", DBFlags.create);
-	scope (exit)
-		db.txn.abort();
-	scope (exit)
-		db.close();
 	auto key = "foo";
 	auto value = "3";
 	check(db.set(key, value));
 	txn.commit();
-	db.txn = env.begin(TxnFlags.readOnly);
+	db.txn = db.begin(TxnFlags.readOnly);
 	writeln("stat: ", db.stat);
 	foreach (k, v; db.cursor()) {
 		writeln(cast(string)k, ": ", cast(string)v);

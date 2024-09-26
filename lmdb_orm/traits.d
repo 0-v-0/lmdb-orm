@@ -17,22 +17,79 @@ struct model {
 }
 
 /// Get the name of the table in the database
-template dbNameOf(T) {
-	enum uda = getUDA!(T, model);
-	static if (uda.length)
-		enum dbNameOf = uda.name;
-	else
-		enum dbNameOf = T.stringof;
+enum dbNameOf(T) = getName!(T, model);
+
+unittest {
+	import lmdb_orm.orm;
+
+	@model("Class")
+	static struct S {
+		string name;
+	}
+
+	static assert(dbNameOf!(User) == "User");
+	static assert(dbNameOf!(Company) == "Company");
+	static assert(dbNameOf!(S) == "Class");
+	static assert(dbNameOf!(model) == "");
 }
 
 /// Mark a specific column as serial on the table
-enum serial;
+struct serial {
+	ulong min = 1; /// The minimum value of the serial
+	ulong max = ulong.max; /// The maximum value of the serial
+	ulong step = 1; /// The step of the serial
+}
+
+/// Get the serial of the table
+template getSerial(alias x) {
+	alias udas = getUDAValues!(x, serial);
+	static assert(udas.length < 2, "Only one " ~ serial.stringof ~ " is allowed for " ~ x.stringof);
+	static if (udas.length)
+		alias getSerial = udas[0];
+	static if (is(x)) {
+		static foreach (alias f; x.tupleof) {
+			static if (getSerial!f != serial(0, 0, 0)) {
+				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
+				enum getSerial = .getSerial!f;
+			}
+		}
+	}
+	static if (is(typeof(getSerial) == void))
+		enum getSerial = serial(0, 0, 0);
+}
+
+unittest {
+	import lmdb_orm.orm;
+
+	@serial
+	static struct S {
+		string name;
+	}
+
+	@serial
+	static struct Multi {
+		@serial int x;
+	}
+
+	static struct TypeMismatch {
+		@serial string x;
+	}
+
+	static assert(getSerial!(S) == serial());
+	static assert(!is(typeof(getSerial!(Multi))));
+	static assert(!is(typeof(getSerial!(TypeMismatch))));
+	static assert(getSerial!(User) == serial());
+	static assert(getSerial!(Company) == serial());
+	static assert(getSerial!(Relation) == serial(0, 0, 0));
+}
 
 /// Mark a specific column as primary key on the table
 enum PK;
 
 /// Mark a specific column as unique on the table
-enum unique;
+struct unique {
+	string name; /// The name of the unique index
+}
 
 /// Mark a specific column as non-empty on the table
 enum nonEmpty;
@@ -106,12 +163,24 @@ size_t byteLen(alias filter, alias intern, T)(ref T obj) {
 enum True(alias x) = true;
 enum isPOD(T) = __traits(isPOD, T);
 
-template getUDA(alias sym, T) {
-	static foreach (uda; __traits(getAttributes, sym))
-		static if (is(typeof(getUDA) == void) && is(typeof(uda) == T))
-			alias getUDA = uda;
-	static if (is(typeof(getUDA) == void))
-		alias getUDA = T.init;
+template getUDAValues(alias x, UDA, UDA defaultVal = UDA.init) {
+	template toVal(alias uda) {
+		static if (is(uda))
+			enum toVal = defaultVal;
+		else
+			enum toVal = uda;
+	}
+
+	alias getUDAValues = staticMap!(toVal, getUDAs!(x, UDA));
+}
+
+template getName(alias x, UDA, UDA defaultVal = UDA(x.stringof)) {
+	alias udas = getUDAValues!(x, UDA, defaultVal);
+	static assert(udas.length < 2, "Only one " ~ UDA.stringof ~ " is allowed for " ~ x.stringof);
+	static if (udas.length)
+		enum getName = udas[0].name;
+	else
+		enum getName = null;
 }
 
 alias getAttrs(alias symbol, string member) =
