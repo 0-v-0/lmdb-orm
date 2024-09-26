@@ -133,6 +133,8 @@ struct Env {
 		return flags;
 	}
 
+	// TODO: mdb_env_set_flags
+
 	/** Get the path of the environment.
 	Params:
 	env = the environment handle

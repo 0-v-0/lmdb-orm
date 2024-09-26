@@ -50,6 +50,9 @@ private:
 
 	}
 
+	void vacuum() {
+	}
+
 	LMDB open(T)() {
 		static assert(indexOf!T > -1, "Table " ~ T.stringof ~ " not found");
 		LMDB db = dbs[indexOf!T];
