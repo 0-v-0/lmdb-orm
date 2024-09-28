@@ -1,6 +1,6 @@
 module lmdb_orm.orm;
 
-import lmdb_orm.lmdb : MDB_val, MDB_KEYEXIST;
+import lmdb_orm.lmdb;
 import lmdb_orm.oo;
 import lmdb_orm.traits;
 import std.meta;
@@ -9,7 +9,13 @@ import std.traits;
 import core.stdc.stdlib;
 import core.stdc.string;
 
-alias Next = void delegate();
+/** Base class for exceptions thrown by the database. */
+class DBException : Exception {
+	import std.exception;
+
+	mixin basicExceptionCtors;
+}
+
 private:
 @model(metaDbName)
 struct Meta;
@@ -34,6 +40,92 @@ template UniqueIndices(Tables...) {
 	}
 }
 
+template serialize(alias obj, alias filter, alias intern) {
+	static if (is(typeof(p) == void)) {
+		enum L = byteLen!(T, filter);
+		static if (L) {
+			enum keyLen = L;
+			ubyte[L] buf = void;
+			auto p = buf.ptr;
+			// TODO: optimize for continuous key
+		} else {
+			const keyLen = byteLen!(filter, intern)(obj);
+			auto p = cast(ubyte*)alloca(keyLen);
+		}
+	}
+	auto bytes = {
+		size_t i;
+		foreach (ref x; obj.tupleof) {
+			static if (filter!x) {
+				alias U = typeof(x);
+				alias O = OriginalType!U;
+				static if (isArray!O) {
+					static assert(!hasIndirections!(typeof(x[0])), "not implemented");
+					static if (is(O == E[], E)) {
+						static assert(!isMutable!E, "Element type of " ~ x.stringof ~ " must be immutable");
+						if (x.length < lengthThreshold) { // inline
+							assert(i + size_t.sizeof + x.length * E.sizeof <= keyLen);
+							// TODO: handle unaligned loads
+							*cast(size_t*)(p + i) = x.length;
+							i += size_t.sizeof;
+							auto len = x.length * E.sizeof;
+							memcpy(p + i, x.ptr, len);
+							i += len;
+							continue;
+						}
+					}
+				}
+				assert(i + U.sizeof <= keyLen);
+				*cast(Unqual!U*)(p + i) = x;
+				i += U.sizeof;
+			}
+		}
+		assert(i == keyLen);
+		return p[0 .. i];
+	}();
+}
+
+T deserialize(T)(Val key, Val val) @trusted {
+	T t;
+	auto k = key.ptr;
+	auto v = val.ptr;
+	foreach (ref x; t.tupleof) {
+		alias U = typeof(x);
+		static if (isPK!x) {
+			alias p = k;
+			alias buf = key;
+		} else {
+			alias p = v;
+			alias buf = val;
+		}
+		const end = buf.ptr + buf.length;
+		static if (isArray!U) {
+			static assert(!hasIndirections!(typeof(x[0])), "not implemented");
+			static if (is(O == E[], E)) {
+				static assert(!isMutable!E, "Element type of " ~ x.stringof ~ " must be immutable");
+				assert(p + size_t.sizeof <= end);
+				Arr a;
+				auto len = *cast(size_t*)p;
+				p += size_t.sizeof;
+				if (len < lengthThreshold) { // inline
+					assert(p + len <= end);
+					a.m.mv_size = len;
+					a.m.mv_data = p;
+					x = cast(U)a.v;
+					continue;
+				}
+				// TODO: handle ptr
+			}
+		}
+		assert(p + U.sizeof <= end);
+		x = *cast(Unqual!U*)p;
+		p += x.sizeof;
+		if (p > k.ptr + len)
+			break;
+	}
+	return t;
+}
+
 string checkDBs(DBs...)() {
 	if (__ctfe) {
 		enum nameOf(T) = T.stringof;
@@ -50,6 +142,17 @@ string checkDBs(DBs...)() {
 	return null;
 }
 
+void onUpdate(T)(ref T obj) {
+	// TODO: check foreign key constraints
+	// TODO: check unique constraints
+	foreach (alias x; obj.tupleof) {
+		static if (hasUDA!(x, nonEmpty)) {
+			if (x == typeof(x).init)
+				throw new DBException("Column " ~ x.stringof ~ " cannot be empty");
+		}
+	}
+}
+
 union Arr {
 	Val v;
 	MDB_val m;
@@ -60,7 +163,6 @@ union Arr {
 
 /// name of the meta database
 enum metaDbName = "#meta";
-//static assert(__traits(getParameterStorageClasses, foo, 0)[0] == "scope");
 
 /// Fixed-Schema Database
 struct FSDB(modules...) {
@@ -79,46 +181,29 @@ private:
 	void buildIndex(T)() {
 	}
 
+	/+ TODO
 	void vacuum() {
-		foreach (i; 1 .. maxdbs) {
-			LMDB db = dbs[i];
-			if (db.txn) {
-				db.txn.commit();
-				db.txn = null;
-			}
-			if (db.dbi) {
-				db.close();
-				db.dbi = null;
+		static foreach (i; 1 .. maxdbs) {
+			foreach(val; cursor!(DBs[i])) {
+				dbs[0].set(val.key, val.val);
 			}
 		}
-	}
-
-	void onUpdate(T)(ref T obj) {
-		// TODO: check foreign key constraints
-		// TODO: check unique constraints
-		foreach (alias x; obj.tupleof) {
-			static if (hasUDA!(x, nonEmpty)) {
-				if (x == typeof(x).init)
-					throw new Exception("Column " ~ x.stringof ~ " cannot be empty");
-			}
-		}
-	}
+		db[0].txn.commit();
+	}+/
 
 	LMDB open(T)() {
 		static assert(indexOf!T > -1, "Table " ~ T.stringof ~ " not found");
 		LMDB db = dbs[indexOf!T];
 		if (!db.txn)
 			db.txn = env.begin();
-		if (!db.dbi)
-			db.dbi = db.txn.open(dbNameOf!T, DBFlags.create);
-		return db;
+		return open!T(db);
 	}
 
-	LMDB open(T)(ref Txn txn) {
-		static assert(indexOf!T > -1, "Table " ~ T.stringof ~ " not found");
-		LMDB db = dbs[indexOf!T];
+	LMDB open(T)(LMDB db) {
+		enum flags = DBFlags.create |
+			(getSerial!T == serial(0, 0, 0) ? 0 : DBFlags.integerKey);
 		if (!db.dbi)
-			db.dbi = txn.open(dbNameOf!T, DBFlags.create);
+			db.dbi = db.txn.open(dbNameOf!T, flags);
 		return db;
 	}
 
@@ -128,7 +213,7 @@ private:
 		Arr a;
 		LMDB db = open!T();
 		{
-			mixin serialize!(obj, isPK);
+			mixin serialize!(obj, isPK, intern);
 			enum size = byteLen!(T, filter);
 			static if (size) {
 				a.m.mv_size = size;
@@ -144,7 +229,7 @@ private:
 		}
 		{
 			auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-			mixin serialize!(obj, filter);
+			mixin serialize!(obj, filter, intern);
 		}
 	}
 
@@ -173,47 +258,6 @@ private:
 		data = cast(T[])a.m.mv_data[0 .. data.length];
 	}
 
-	template serialize(alias obj, alias filter) {
-		static if (is(typeof(p) == void)) {
-			enum L = byteLen!(T, filter);
-			static if (L) {
-				enum keyLen = L;
-				ubyte[L] buf = void;
-				auto p = buf.ptr;
-				// TODO: optimize for continuous key
-			} else {
-				const keyLen = byteLen!(filter, intern, T)(obj);
-				auto p = cast(ubyte*)alloca(keyLen);
-			}
-		}
-		auto bytes = {
-			size_t i;
-			foreach (ref x; obj.tupleof) {
-				static if (filter!x) {
-					alias U = typeof(x);
-					static if (isArray!U) {
-						static assert(!hasIndirections!(typeof(x[0])), "not implemented");
-						static if (isDynamicArray!U) {
-							if (x.length < lengthThreshold) { // inline
-								// TODO: handle unaligned loads
-								*cast(size_t*)(p + i) = x.length;
-								i += size_t.sizeof;
-								auto len = x.length * typeof(x[0]).sizeof;
-								memcpy(p + i, x.ptr, len);
-								i += len;
-								continue;
-							}
-						}
-					}
-					*cast(Unqual!U*)(p + i) = x;
-					i += U.sizeof;
-				}
-			}
-			assert(i == keyLen);
-			return p[0 .. i];
-		}();
-	}
-
 public:
 	@property ref env() => e;
 	alias env this;
@@ -229,13 +273,14 @@ public:
 	}
 
 	@disable this(this);
-
+	/+
 	void open(in char[] path, EnvFlags flags = EnvFlags.none, ushort mode = defaultMode) {
 		auto cpath = cast(char*)alloca(path.length + 1);
 		cpath[0 .. path.length] = path;
 		cpath[path.length] = '\0';
 		open(cpath, flags, mode);
 	}
+	+/
 
 	/// ditto
 	void open(scope const char* path, EnvFlags flags = EnvFlags.none, ushort mode = defaultMode) {
@@ -248,110 +293,99 @@ public:
 		check(e.open(path, flags, mode));
 	}
 
+	auto cursor(T)(CursorOp op = CursorOp.next)
+		=> open!T().cursor(op);
+
 	void save(T)(in T obj) @trusted {
+		scope Next next = () { onUpdate(obj); store(obj); };
+		static if (__traits(getOverloads, obj, "onSave").length) {
+			//static assert(__traits(getParameterStorageClasses, foo, 0)[0] == "scope");
+			obj.onSave(next);
+		} else {
+			next();
+		}
 	}
 
 	void del(T)(in T obj) {
 		LMDB db = open!T();
-		mixin serialize!(obj, isPK);
+		mixin serialize!(obj, isPK, intern);
 		check(db.del(bytes));
 		// TODO: implement cascade delete
 	}
 }
 
-struct Query {
-private:
-	//Txn txn;
-	//MDB_dbi dbi;
-public:
-	ulong insertID;
-	ulong affected;
-}
-
-version (unittest) {
-	import std.stdio;
-
-	@model
-	struct User {
-		@serial long id;
-		@unique string name;
-		@foreign!(Company.id) long companyID;
-		long createdAt;
-		long updatedAt;
-
-		void onInsert(scope Next next) {
-			createdAt = now();
-			next();
-		}
-
-		void onSave(scope Next next) {
-			updatedAt = now();
-			next();
-		}
+struct Cursor(T) {
+	private MDB_cursor* cursor;
+	alias cursor this;
+	Val key;
+	Val val;
+	private int rc;
+	private this(MDB_cursor* cur, CursorOp op)
+	in (cur !is null) {
+		cursor = cur;
+		rc = cast(int)op + opOffset;
 	}
 
-	@model
-	struct Company {
-		@serial long id;
-		@unique string name;
-
-		void onDelete(scope Next next) {
-			writeln("Company ", id, " is deleted");
-			next();
-		}
+	~this() @trusted {
+		close(cursor);
 	}
 
-	enum RelationType {
-		friend,
-		colleague,
-		enemy,
+	@disable this(this);
+
+	void popFront() @trusted {
+		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.next);
 	}
 
-	@model
-	struct Relation {
-		@PK @foreign!(User.id) long userA;
-		@PK @foreign!(User.id) long userB;
-		RelationType type;
-
-		void onSave(scope Next next) {
-			if (type < RelationType.min || type > RelationType.max)
-				throw new Exception("Invalid relation type");
-
-			next();
-		}
+	void popBack() @trusted {
+		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.prev);
 	}
 
-	@property auto now() {
-		import std.datetime;
+	/// Store by cursor.
+	void save(T, U)(in T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+		=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
-		try {
-			return Clock.currStdTime;
-		} catch (Exception) {
-			return 0;
-		}
+	/// Delete by cursor.
+	void del(DeleteFlags flags = DeleteFlags.none)
+		=> check(mdb_cursor_del(cursor, flags));
+
+@property:
+	/// Return count of duplicates for current key.
+	size_t count() @trusted {
+		size_t count = void;
+		check(mdb_cursor_count(cursor, &count));
+		return count;
 	}
+
+	/// Return the cursor's database handle.
+	auto dbi() @trusted
+		=> mdb_cursor_dbi(cursor);
+
+	bool empty() @trusted {
+		if (opOffset <= rc && rc <= opOffset + CursorOp.max)
+			rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, cast(MDB_cursor_op)(
+					rc - opOffset));
+		if (rc != MDB_NOTFOUND)
+			check(rc);
+		return rc == MDB_NOTFOUND;
+	}
+
+	T front() @trusted {
+		return deserialize!T(key, val);
+	}
+
+	alias back = front;
 }
 
 unittest {
-	alias modules = AliasSeq!(lmdb_orm.orm);
+	import std.meta;
+	import std.stdio;
+
+	alias modules = AliasSeq!(lmdb_orm.traits);
 	auto db = FSDB!modules(256 << 10);
 	db.open("./test", EnvFlags.fixedMap | EnvFlags.noSubdir | EnvFlags.writeMap);
-	writeln("maxreaders: ", db.maxreaders);
-	writeln("maxkeysize: ", db.maxkeysize);
-	writeln("flags: ", db.flags);
-	writeln("envinfo: ", db.envinfo);
-	writeln("stat: ", db.stat);
-	check(db.sync());
 	Txn txn = db.begin();
-	writeln("id: ", txn.id);
-	auto key = "foo";
-	auto value = "3";
-	check(db.set(key, value));
-	txn.commit();
-	db.txn = db.begin(TxnFlags.readOnly);
-	writeln("stat: ", db.stat);
-	foreach (k, v; db.cursor()) {
-		writeln(cast(string)k, ": ", cast(string)v);
-		writeln(k.ptr, ": ", v.ptr);
+	txn.save(User(1, "John Doe", 1, 1));
+	foreach (user; db.cursor()) {
+		writeln(user);
 	}
 }

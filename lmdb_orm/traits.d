@@ -100,7 +100,9 @@ template foreign(alias field) {
 
 alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
 
-enum isPK(alias x) = hasUDA!(x, PK);
+enum isPK(alias x) = hasUDA!(x, PK) || hasUDA!(x, serial);
+
+alias Next = void delegate() @safe @nogc;
 
 package(lmdb_orm):
 
@@ -232,4 +234,67 @@ bool unlikely(bool exp) {
 		return llvm_expect(exp, false);
 	} else
 		return exp;
+}
+
+version (unittest):
+import std.stdio;
+
+@model
+struct User {
+    @serial long id;
+    @unique string name;
+    @foreign!(Company.id) long companyID;
+    long createdAt;
+    long updatedAt;
+
+    void onInsert(scope Next next) {
+        createdAt = now();
+        next();
+    }
+
+    void onSave(scope Next next) {
+        updatedAt = now();
+        next();
+    }
+}
+
+@model
+struct Company {
+    @serial long id;
+    @unique string name;
+
+    void onDelete(scope Next next) {
+        writeln("Company ", id, " is deleted");
+        next();
+    }
+}
+
+enum RelationType {
+    friend,
+    colleague,
+    enemy,
+}
+
+@model
+struct Relation {
+    @PK @foreign!(User.id) long userA;
+    @PK @foreign!(User.id) long userB;
+    RelationType type;
+
+    void onSave(scope Next next) {
+        if (type < RelationType.min || type > RelationType.max)
+            throw new Exception("Invalid relation type");
+
+        next();
+    }
+}
+
+@property auto now() {
+    import std.datetime;
+
+    try {
+        return Clock.currStdTime;
+    } catch (Exception) {
+        return 0;
+    }
 }

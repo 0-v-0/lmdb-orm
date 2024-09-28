@@ -23,7 +23,6 @@ struct Env {
 
 	~this() {
 		close(env);
-		env = null;
 	}
 
 	@disable this(this);
@@ -211,8 +210,7 @@ struct Txn {
 	}
 
 	~this() @trusted {
-		if (txn)
-			commit();
+		abort(txn);
 	}
 
 	@disable this(this);
