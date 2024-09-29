@@ -1,5 +1,6 @@
 module lmdb_orm.orm;
 
+import lmdb_orm.index;
 import lmdb_orm.lmdb;
 import lmdb_orm.oo;
 import lmdb_orm.traits;
@@ -17,28 +18,8 @@ class DBException : Exception {
 }
 
 private:
-@model(metaDbName)
-struct Meta;
-
-template Index(string name) {
-	@model(name)
-	struct Index {
-		@PK Val key;
-		Val val;
-	}
-}
-
-template UniqueIndices(Tables...) {
-	alias UniqueIndices = AliasSeq!();
-	static foreach (T; Tables) {
-		static foreach (alias x; T.tupleof) {
-			static if (getName!(x, unique)) {
-				UniqueIndices = AliasSeq!(UniqueIndices,
-					Index!(dbNameOf!T ~ "." ~ getName!(x, unique)));
-			}
-		}
-	}
-}
+@model(blobDbName)
+struct Blob;
 
 template serialize(alias obj, alias filter, alias intern) {
 	static if (is(typeof(p) == void)) {
@@ -73,6 +54,7 @@ template serialize(alias obj, alias filter, alias intern) {
 							i += len;
 							continue;
 						}
+						// TODO: handle ptr
 					}
 				}
 				assert(i + U.sizeof <= keyLen);
@@ -161,8 +143,8 @@ union Arr {
 @property ref mark(MDB_val m)
 	=> (cast(ubyte*)m.mv_data)[m.mv_size - 1];
 
-/// name of the meta database
-enum metaDbName = "#meta";
+/// name of the blob database
+enum blobDbName = "#blob";
 
 /// Fixed-Schema Database
 struct FSDB(modules...) {
@@ -170,7 +152,7 @@ struct FSDB(modules...) {
 	/// Maximum number of databases for the environment
 	enum maxdbs = DBs.length;
 private:
-	alias DBs = AliasSeq!(Meta, Tables, UniqueIndices!Tables);
+	alias DBs = AliasSeq!(Blob, Tables, UniqueIndices!Tables);
 	Env e;
 	LMDB[maxdbs] dbs;
 
@@ -234,7 +216,7 @@ private:
 	}
 
 	void intern(T)(ref T[] data) @trusted {
-		LMDB db = open!Meta();
+		LMDB db = open!Blob();
 		XXH64_hash_t seed;
 	rehash:
 		XXH64_hash_t[1] k = [xxh3_64Of(data, seed)];
