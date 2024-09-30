@@ -44,13 +44,16 @@ struct serial {
 template getSerial(alias x) {
 	alias udas = getUDAValues!(x, serial);
 	static assert(udas.length < 2, "Only one " ~ serial.stringof ~ " is allowed for " ~ x.stringof);
-	static if (udas.length)
+	static if (udas.length) {
 		alias getSerial = udas[0];
+		enum index = -1;
+	}
 	static if (is(x)) {
-		static foreach (alias f; x.tupleof) {
+		static foreach (i, alias f; x.tupleof) {
 			static if (getSerial!f != serial(0, 0, 0)) {
 				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
 				enum getSerial = .getSerial!f;
+				enum index = i;
 			}
 		}
 	}
@@ -102,7 +105,7 @@ alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
 
 enum isPK(alias x) = hasUDA!(x, PK) || hasUDA!(x, serial);
 
-alias Next = void delegate() @safe @nogc;
+alias Next = void delegate() @safe;
 
 package:
 
@@ -252,14 +255,12 @@ struct User {
 	long createdAt;
 	long updatedAt;
 
-	void onInsert(scope Next next) {
-		createdAt = now();
-		next();
-	}
-
 	void onSave(scope Next next) {
-		updatedAt = now();
-		next();
+		if (next) {
+			updatedAt = now();
+			next();
+		}
+		createdAt = now();
 	}
 }
 

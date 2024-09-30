@@ -19,7 +19,7 @@ package template Handle(alias ptr, bool ctor = true) {
 		}
 
 	~this() {
-		//close(ptr);
+		close(ptr);
 	}
 
 	@disable this(this);
@@ -681,7 +681,7 @@ unittest {
 	Env env = create();
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap));
+	check(env.open("./test", EnvFlags.writeMap));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);

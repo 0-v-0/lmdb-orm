@@ -23,19 +23,19 @@ private:
 @model(blobDbName)
 struct Blob;
 
-template serialize(alias obj, alias filter, alias intern) {
-	//static if (is(typeof(p) == void)) {
+template serialize(alias obj, alias filter, alias intern, bool alloc = true) {
 	enum L = byteLen!(T, filter);
 	static if (L) {
-		enum keyLen = L;
+		enum length = L;
 		ubyte[L] buf = void;
-		auto p = buf.ptr;
+		static if (alloc)
+			auto p = buf.ptr;
 		// TODO: optimize for continuous key
 	} else {
-		const keyLen = byteLen!(filter, intern)(obj);
-		auto p = cast(ubyte*)alloca(keyLen);
+		const length = byteLen!(filter, intern)(obj);
+		static if (alloc)
+			auto p = cast(ubyte*)alloca(length);
 	}
-	//}
 	auto bytes = {
 		size_t i;
 		alias T = typeof(obj);
@@ -49,7 +49,7 @@ template serialize(alias obj, alias filter, alias intern) {
 						static assert(!isMutable!E, "Element type of " ~ fullyQualifiedName!(
 								T.tupleof[I]) ~ " must be immutable");
 						if (x.length < lengthThreshold) { // inline
-							assert(i + size_t.sizeof + x.length * E.sizeof <= keyLen);
+							assert(i + size_t.sizeof + x.length * E.sizeof <= length);
 							// TODO: handle unaligned loads
 							*cast(size_t*)(p + i) = x.length;
 							i += size_t.sizeof;
@@ -61,31 +61,30 @@ template serialize(alias obj, alias filter, alias intern) {
 						// TODO: handle ptr
 					}
 				}
-				assert(i + U.sizeof <= keyLen);
+				assert(i + U.sizeof <= length);
 				*cast(Unqual!U*)(p + i) = x;
 				i += U.sizeof;
 			}
 		}
 
-		assert(i == keyLen);
+		assert(i == length);
 		return p[0 .. i];
 	}();
 }
 
-T deserialize(T)(Val key, Val val) @trusted {
+T deserialize(T, P)(ref P pair) @trusted {
 	T t;
-	auto k = key.ptr;
-	auto v = val.ptr;
+	auto k = pair.key.ptr;
+	auto v = pair.val.ptr;
 	foreach (I, ref x; t.tupleof) {
 		alias U = typeof(x);
 		static if (isPK!(T.tupleof[I])) {
 			alias p = k;
-			alias buf = key;
+			const end = pair.key.ptr + pair.key.length;
 		} else {
 			alias p = v;
-			alias buf = val;
+			const end = pair.val.ptr + pair.val.length;
 		}
-		const end = buf.ptr + buf.length;
 		static if (isArray!U) {
 			static assert(!hasIndirections!(typeof(x[0])), "not implemented");
 			static if (is(OriginalType!U == E[], E)) {
@@ -94,13 +93,13 @@ T deserialize(T)(Val key, Val val) @trusted {
 				assert(p + size_t.sizeof <= end);
 				Arr a;
 				const len = *cast(size_t*)p;
-				debug writeln("len: ", len);
 				p += size_t.sizeof;
 				if (len < lengthThreshold) { // inline
 					assert(p + len <= end);
 					a.m.mv_size = len;
 					a.m.mv_data = cast(void*)p;
 					x = cast(U)a.v;
+					p += len;
 					continue;
 				}
 				// TODO: handle ptr
@@ -109,8 +108,6 @@ T deserialize(T)(Val key, Val val) @trusted {
 		assert(p + U.sizeof <= end);
 		x = *cast(Unqual!U*)p;
 		p += x.sizeof;
-		if (p >= end)
-			break;
 	}
 	return t;
 }
@@ -203,9 +200,17 @@ struct FSDB(modules...) {
 		void store(T)(ref T obj) @trusted {
 			alias filter = templateNot!isPK;
 
-			Arr a;
 			const dbi = open!T();
 			scope dg = &intern;
+			mixin getSerial!T;
+			static if (getSerial != serial(0, 0, 0)) {
+				alias t = obj.tupleof;
+				if (!t[index]) {
+					auto cur = cursor!T(CursorOp.last);
+					t[index] = cur.empty ? 1 : *cast(typeof(t[index])*)cur.key.ptr + 1;
+				}
+			}
+			Arr a;
 			{
 				mixin serialize!(obj, isPK, dg);
 				enum size = byteLen!(T, filter);
@@ -215,22 +220,27 @@ struct FSDB(modules...) {
 					a.m.mv_size = byteLen!(filter, dg, T)(obj);
 				}
 
+				debug writeln("save key: ", bytes);
 				auto key = cast(MDB_val*)&bytes;
-				int rc = mdb_put(txn, dbi, key, &a.m, WriteFlags.noOverwrite | WriteFlags.reserve);
+				int rc = mdb_put(txn, dbi, key, &a.m,
+					WriteFlags.noOverwrite | WriteFlags.reserve);
 				if (rc == MDB_KEYEXIST) {
 					rc = mdb_put(txn, dbi, key, &a.m, WriteFlags.reserve);
+					check(rc);
+				} else {
+					check(rc);
+					static if (__traits(getOverloads, obj, "onSave").length)
+						obj.onSave(null);
 				}
-				check(rc);
-				debug writeln("save key: ", bytes);
 			}
 			{
 				auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-				mixin serialize!(obj, filter, dg);
+				mixin serialize!(obj, filter, dg, false);
 				debug writeln("save val: ", bytes);
 			}
 		}
 
-		void intern(ref Val data) @nogc @trusted {
+		void intern(ref Val data) @trusted {
 			import lmdb_orm.xxh3;
 
 			const dbi = open!Blob();
@@ -304,7 +314,7 @@ struct FSDB(modules...) {
 		}
 
 		void save(T)(T obj) @trusted {
-			scope Next next = () @safe { onUpdate(obj); store(obj); };
+			scope Next next = () @trusted { onUpdate(obj); store(obj); };
 			static if (__traits(getOverloads, obj, "onSave").length) {
 				//static assert(__traits(getParameterStorageClasses, foo, 0)[0] == "scope");
 				obj.onSave(next);
@@ -313,11 +323,15 @@ struct FSDB(modules...) {
 			}
 		}
 
-		void del(T)(in T obj) {
+		bool del(T)(in T obj) {
 			const dbi = open!T();
 			mixin serialize!(obj, isPK, intern);
-			check(mdb_del(txn, dbi, cast(MDB_val*)&bytes, null));
+			int rc = mdb_del(txn, dbi, cast(MDB_val*)&bytes, null);
+			if (rc == MDB_NOTFOUND)
+				return false;
+			check(rc);
 			// TODO: implement cascade delete
+			return true;
 		}
 	}
 
@@ -340,10 +354,6 @@ public:
 		e = create();
 		e.mapsize = size;
 		e.maxdbs = maxdbs;
-	}
-
-	~this() @trusted {
-		close(env);
 	}
 
 	@disable this(this);
@@ -435,8 +445,7 @@ struct Cursor(T) {
 	}
 
 	T front() @safe {
-		debug writeln("key: ", key, " val: ", val);
-		return deserialize!T(key, val);
+		return deserialize!T(this);
 	}
 
 	alias back = front;
@@ -448,16 +457,17 @@ unittest {
 
 	alias modules = AliasSeq!(lmdb_orm.traits);
 	auto db = FSDB!modules(256 << 10);
-	db.open("./docs", EnvFlags.fixedMap | EnvFlags.writeMap);
+	db.open("./test2", EnvFlags.writeMap);
 	auto txn = db.begin();
-	txn.save(User(1, "John Doe", 1, 1));
+	txn.save(User(0, "Alice", 0));
+	txn.save(User(0, "Bob", 1));
 	txn.commit();
-	txn = db.begin();
+	txn = db.begin(TxnFlags.readOnly);
 	foreach (user; txn.cursor!User()) {
 		writeln(user);
 	}
-	txn.abort();
 	txn = db.begin();
 	writeln(txn.id);
 	txn.del(User(1));
+	txn.commit();
 }
