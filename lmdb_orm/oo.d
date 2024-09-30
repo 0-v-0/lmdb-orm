@@ -8,24 +8,30 @@ version (unittest) {
 	import std.stdio;
 }
 
+package template Handle(alias ptr, bool ctor = true) {
+	alias handle this;
+	@property auto handle() => ptr;
+
+	static if (ctor)
+		private this(typeof(ptr) x)
+		in (x !is null) {
+			ptr = x;
+		}
+
+	~this() {
+		//close(ptr);
+	}
+
+	@disable this(this);
+}
+
 /** -rw-r--r-- */
 enum defaultMode = octal!644;
 
 struct Env {
 	private MDB_env* env;
-	alias handle this;
-	@property auto handle() => env;
 
-	private this(MDB_env* e)
-	in (e !is null) {
-		env = e;
-	}
-
-	~this() {
-		close(env);
-	}
-
-	@disable this(this);
+	mixin Handle!env;
 
 	/** Open an environment handle.
 	Params:
@@ -201,19 +207,9 @@ struct Env {
 struct Txn {
 	private MDB_txn* txn;
 
-	alias handle this;
-	@property auto handle() => txn;
+	mixin Handle!txn;
 
-	private this(MDB_txn* t)
-	in (t !is null) {
-		txn = t;
-	}
-
-	~this() @trusted {
-		abort(txn);
-	}
-
-	@disable this(this);
+	private alias close = abort;
 
 	/** Open a database in the environment.
 	Params:
@@ -251,13 +247,13 @@ alias Val = const(void)[];
 alias FileHandle = mdb_filehandle_t;
 
 private alias CO = MDB_cursor_op;
-private enum opOffset = MDB_LAST_ERRCODE + 1;
+package enum opOffset = MDB_LAST_ERRCODE + 1;
 
 struct Cursor {
 	import std.typecons : tuple;
 
 	private MDB_cursor* cursor;
-	alias cursor this;
+	mixin Handle!(cursor, false);
 	Val key;
 	Val val;
 	private int rc;
@@ -266,12 +262,6 @@ struct Cursor {
 		cursor = cur;
 		rc = cast(int)op + opOffset;
 	}
-
-	~this() @trusted {
-		close(cursor);
-	}
-
-	@disable this(this);
 
 	void popFront() @trusted {
 		rc = mdb_cursor_get(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, CursorOp.next);
@@ -362,7 +352,7 @@ Params:
 err = The error code
 Returns: "error message" The description of the error
  */
-string errorString(int err) @trusted
+auto errorString(int err) @trusted
 	=> cast(string)fromStringz(mdb_strerror(err));
 
 unittest {
@@ -383,12 +373,12 @@ Params:
 origin = The origin of the LMDB function call (for error messages)
 rc = The return code from an LMDB function call
  */
-void check(string origin = __FUNCTION__)(int rc) {
-	import std.conv : text;
+void check(int rc) @nogc @trusted {
+	//import std.conv : text;
 
 	if (rc) {
-		auto msg = text(origin ~ ": ", errorString(rc), " (", rc, ")");
-		throw new MbdError(msg);
+		//auto msg = text(errorString(rc), " (", rc, ")");
+		throw new MbdError(errorString(rc));
 	}
 }
 
@@ -542,9 +532,8 @@ alias close = mdb_env_close;
 alias userctx = mdb_env_get_userctx;
 
 /// ditto
-@property ref userctx(ref Env env, void* ctx) {
+void userctx(MDB_env* env, void* ctx) {
 	check(mdb_env_set_userctx(env, ctx));
-	return env;
 }
 
 alias env = mdb_txn_env;
@@ -625,9 +614,9 @@ struct LMDB {
 
 	/// Get a cursor handle.
 	Cursor cursor(CursorOp op = CursorOp.next) @trusted {
-		MDB_cursor* cursor = void;
-		check(mdb_cursor_open(txn, dbi, &cursor));
-		return Cursor(cursor, op);
+		MDB_cursor* cur = void;
+		check(mdb_cursor_open(txn, dbi, &cur));
+		return Cursor(cur, op);
 	}
 
 nothrow:
@@ -692,7 +681,7 @@ unittest {
 	Env env = create();
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap | EnvFlags.noSubdir));
+	check(env.open("./test", EnvFlags.fixedMap | EnvFlags.writeMap));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);

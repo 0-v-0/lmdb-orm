@@ -1,4 +1,7 @@
 module lmdb_orm.linq;
+
+import std.traits;
+
 private:
 
 void pop(R)(ref R a, ref R b) {
@@ -25,12 +28,18 @@ template Ctor(R) {
 
 extern (C++):
 
-class Intersect(R) {
+interface Iterator(T) {
+	@property T front();
+	@property bool empty();
+	void popFront();
+}
+
+class Intersect(R, E = ForeachType!R) : Iterator!E {
 	mixin Ctor!R;
 
-	@property auto ref front() => a.front;
+	@property override E front() => a.front;
 
-	@property bool empty() {
+	@property override bool empty() {
 		while (!a.empty && !b.empty) {
 			const x = a.front;
 			const y = b.front;
@@ -45,7 +54,7 @@ class Intersect(R) {
 		return true;
 	}
 
-	auto popFront() {
+	override void popFront() {
 		while (!a.empty && !b.empty) {
 			const x = a.front;
 			const y = b.front;
@@ -77,10 +86,10 @@ unittest {
 	assert(y.empty);
 }
 
-class Union(R) {
+class Union(R, E = ForeachType!R) : Iterator!E {
 	mixin Ctor!R;
 
-	@property auto ref front() {
+	@property override E front() {
 		if (a.empty) {
 			return b.front;
 		}
@@ -92,9 +101,9 @@ class Union(R) {
 		return x < y ? x : y;
 	}
 
-	@property bool empty() => a.empty && b.empty;
+	@property override bool empty() => a.empty && b.empty;
 
-	auto popFront() {
+	override void popFront() {
 		if (a.empty) {
 			b.popFront();
 		} else if (b.empty) {
@@ -120,12 +129,12 @@ unittest {
 	assert(y.equal(iota(0, 10, 1)));
 }
 
-class Diff(R) {
+class Diff(R, E = ForeachType!R) : Iterator!E {
 	mixin Ctor!R;
 
-	@property auto ref front() => a.front;
+	@property override E front() => a.front;
 
-	@property bool empty() {
+	@property override bool empty() {
 		while (!a.empty && !b.empty) {
 			const x = a.front;
 			const y = b.front;
@@ -139,7 +148,7 @@ class Diff(R) {
 		return a.empty;
 	}
 
-	auto popFront() {
+	override void popFront() {
 		if (!a.empty) {
 			if (b.empty)
 				a.popFront();
@@ -164,10 +173,10 @@ unittest {
 	assert(y.equal(iota(0, 10, 2)));
 }
 
-class SymDiff(R) {
+class SymDiff(R, E = ForeachType!R) : Iterator!E {
 	mixin Ctor!R;
 
-	@property auto ref front() {
+	@property override E front() {
 		if (a.empty) {
 			return b.front;
 		}
@@ -179,7 +188,7 @@ class SymDiff(R) {
 		return x < y ? x : y;
 	}
 
-	@property bool empty() {
+	@property override bool empty() {
 		while (!a.empty && !b.empty) {
 			const x = a.front;
 			const y = b.front;
@@ -191,7 +200,7 @@ class SymDiff(R) {
 		return a.empty && b.empty;
 	}
 
-	auto popFront() {
+	override void popFront() {
 		if (a.empty) {
 			b.popFront();
 		} else if (b.empty) {
@@ -209,7 +218,7 @@ unittest {
 	import std.algorithm;
 	import std.range;
 
-	auto e = symDiff(iota(0, 0), iota(2, 5));
+	Iterator!int e = symDiff(iota(0, 0), iota(2, 5));
 	assert(e.equal(iota(2, 5)));
 	auto x = symDiff(iota(0, 10), iota(5, 15));
 	assert(x.equal([0, 1, 2, 3, 4, 10, 11, 12, 13, 14]));

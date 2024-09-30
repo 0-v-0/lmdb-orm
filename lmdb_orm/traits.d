@@ -104,7 +104,7 @@ enum isPK(alias x) = hasUDA!(x, PK) || hasUDA!(x, serial);
 
 alias Next = void delegate() @safe @nogc;
 
-package(lmdb_orm):
+package:
 
 /// threshold for inlining arrays, default 64
 // TODO
@@ -140,21 +140,24 @@ unittest {
 
 /// Get the size of the serialized object
 size_t byteLen(alias filter, alias intern, T)(ref T obj) {
+	import lmdb_orm.oo;
+
 	size_t size;
-	foreach (ref x; obj.tupleof) {
-		static if (filter!x) {
+	foreach (i, ref x; obj.tupleof) {
+		static if (filter!(T.tupleof[i])) {
 			static if (isArray!(typeof(x))) {
 				static assert(!hasIndirections!(typeof(x[0])), "not implemented");
-				static if (isStaticArray!(typeof(x))) {
-					size += x.length * typeof(x[0]).sizeof;
-				} else {
+				static if (is(typeof(x) == E[], E)) {
+					static assert(!isMutable!E, "Element type of " ~ fullyQualifiedName!(
+							T.tupleof[i]) ~ " must be immutable");
 					if (x.length < lengthThreshold) // inline
 						size += size_t.sizeof + x.length * typeof(x[0]).sizeof;
 					else {
-						intern(x);
+						intern(*cast(Val*)&x);
 						size += Val.sizeof;
 					}
-				}
+				} else
+					size += x.sizeof;
 			} else
 				size += x.sizeof;
 		}
@@ -218,22 +221,24 @@ template getSymbolsWith(alias attr, symbols...) {
 	}
 }
 
-bool likely(bool exp) {
-	version (LDC) {
-		import ldc.intrinsics;
+pure @nogc @safe {
+	bool likely(bool exp) {
+		version (LDC) {
+			import ldc.intrinsics;
 
-		return llvm_expect(exp, true);
-	} else
-		return exp;
-}
+			return llvm_expect(exp, true);
+		} else
+			return exp;
+	}
 
-bool unlikely(bool exp) {
-	version (LDC) {
-		import ldc.intrinsics;
+	bool unlikely(bool exp) {
+		version (LDC) {
+			import ldc.intrinsics;
 
-		return llvm_expect(exp, false);
-	} else
-		return exp;
+			return llvm_expect(exp, false);
+		} else
+			return exp;
+	}
 }
 
 version (unittest):
@@ -241,60 +246,60 @@ import std.stdio;
 
 @model
 struct User {
-    @serial long id;
-    @unique string name;
-    @foreign!(Company.id) long companyID;
-    long createdAt;
-    long updatedAt;
+	@serial long id;
+	@unique string name;
+	@foreign!(Company.id) long companyID;
+	long createdAt;
+	long updatedAt;
 
-    void onInsert(scope Next next) {
-        createdAt = now();
-        next();
-    }
+	void onInsert(scope Next next) {
+		createdAt = now();
+		next();
+	}
 
-    void onSave(scope Next next) {
-        updatedAt = now();
-        next();
-    }
+	void onSave(scope Next next) {
+		updatedAt = now();
+		next();
+	}
 }
 
 @model
 struct Company {
-    @serial long id;
-    @unique string name;
+	@serial long id;
+	@unique string name;
 
-    void onDelete(scope Next next) {
-        writeln("Company ", id, " is deleted");
-        next();
-    }
+	void onDelete(scope Next next) {
+		writeln("Company ", id, " is deleted");
+		next();
+	}
 }
 
 enum RelationType {
-    friend,
-    colleague,
-    enemy,
+	friend,
+	colleague,
+	enemy,
 }
 
 @model
 struct Relation {
-    @PK @foreign!(User.id) long userA;
-    @PK @foreign!(User.id) long userB;
-    RelationType type;
+	@PK @foreign!(User.id) long userA;
+	@PK @foreign!(User.id) long userB;
+	RelationType type;
 
-    void onSave(scope Next next) {
-        if (type < RelationType.min || type > RelationType.max)
-            throw new Exception("Invalid relation type");
+	void onSave(scope Next next) {
+		if (type < RelationType.min || type > RelationType.max)
+			throw new Exception("Invalid relation type");
 
-        next();
-    }
+		next();
+	}
 }
 
 @property auto now() {
-    import std.datetime;
+	import std.datetime;
 
-    try {
-        return Clock.currStdTime;
-    } catch (Exception) {
-        return 0;
-    }
+	try {
+		return Clock.currStdTime;
+	} catch (Exception) {
+		return 0;
+	}
 }
