@@ -187,7 +187,7 @@ struct FSDB(modules...) {
 		}
 
 		~this() @trusted {
-			//abort(txn);
+			abort(txn);
 		}
 
 		//private alias close = abort;
