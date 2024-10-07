@@ -35,6 +35,8 @@ unittest {
 
 /// Mark a specific column as serial on the table
 struct serial {
+	enum invalid = serial(0, 0, 0);
+
 	ulong min = 1; /// The minimum value of the serial
 	ulong max = ulong.max; /// The maximum value of the serial
 	ulong step = 1; /// The step of the serial
@@ -50,7 +52,7 @@ template getSerial(alias x) {
 	}
 	static if (is(x)) {
 		static foreach (i, alias f; x.tupleof) {
-			static if (getSerial!f != serial(0, 0, 0)) {
+			static if (getSerial!f != serial.invalid) {
 				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
 				enum getSerial = .getSerial!f;
 				enum index = i;
@@ -58,7 +60,7 @@ template getSerial(alias x) {
 		}
 	}
 	static if (is(typeof(getSerial) == void))
-		enum getSerial = serial(0, 0, 0);
+		enum getSerial = serial.invalid;
 }
 
 unittest {
@@ -83,7 +85,7 @@ unittest {
 	static assert(!is(typeof(getSerial!(TypeMismatch))));
 	static assert(getSerial!(User) == serial());
 	static assert(getSerial!(Company) == serial());
-	static assert(getSerial!(Relation) == serial(0, 0, 0));
+	static assert(getSerial!(Relation) == serial.invalid);
 }
 
 /// Mark a specific column as primary key on the table
