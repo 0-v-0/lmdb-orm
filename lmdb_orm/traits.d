@@ -53,6 +53,7 @@ template getSerial(alias x) {
 	static if (is(x)) {
 		static foreach (i, alias f; x.tupleof) {
 			static if (getSerial!f != serial.invalid) {
+				static assert(i == 0, "Serial column must be the first column");
 				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
 				enum getSerial = .getSerial!f;
 				enum index = i;

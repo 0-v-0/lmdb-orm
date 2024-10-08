@@ -215,11 +215,13 @@ struct FSDB(modules...) {
 
 			scope dg = &intern;
 			mixin getSerial!T;
+			auto flags = WriteFlags.reserve;
 			static if (getSerial != serial.invalid) {
 				alias t = obj.tupleof;
 				if (!t[index]) {
 					auto cur = Cursor!T(txn, dbi, CursorOp.last);
 					t[index] = cur.empty ? 1 : *cast(typeof(t[index])*)cur.key.ptr + 1;
+					flags |= WriteFlags.append;
 				}
 			}
 			Arr a;
@@ -234,9 +236,9 @@ struct FSDB(modules...) {
 
 				auto key = cast(MDB_val*)&bytes;
 				int rc = mdb_put(txn, dbi, key, &a.m,
-					WriteFlags.noOverwrite | WriteFlags.reserve);
+					WriteFlags.noOverwrite | flags);
 				if (rc == MDB_KEYEXIST) {
-					rc = mdb_put(txn, dbi, key, &a.m, WriteFlags.reserve);
+					rc = mdb_put(txn, dbi, key, &a.m, flags);
 					check(rc);
 				} else {
 					check(rc);
@@ -426,7 +428,7 @@ struct Cursor(T) {
 	}
 
 	/// Store by cursor.
-	void save(T, U)(in T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+	void save(WriteFlags flags = WriteFlags.none)
 		=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/// Delete by cursor.
@@ -476,6 +478,11 @@ unittest {
 	foreach (user; txn.cursor!User()) {
 		writeln(user);
 	}
+	txn = db.begin();
+	foreach (user; txn.cursor!User()) {
+		user.companyID = 1;
+	}
+	txn.commit();
 	txn = db.begin();
 	writeln(txn.id);
 	txn.del(User(1));
