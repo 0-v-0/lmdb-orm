@@ -666,6 +666,11 @@ nothrow:
 	int drop(bool del = false) => mdb_drop(txn, dbi, del);
 }
 
+package bool inDB(ref Env env, in void[] a) {
+	auto info = env.envinfo;
+	return a.ptr >= info.mapaddr && a.ptr + a.length <= info.mapaddr + info.mapsize;
+}
+
 alias txn = mdb_cursor_txn;
 
 /// Renew a cursor handle.
@@ -681,7 +686,7 @@ unittest {
 	Env env = create();
 	env.mapsize = 256 << 10;
 	env.maxdbs = 2;
-	check(env.open("./test", EnvFlags.writeMap));
+	check(env.open("./db/test", EnvFlags.writeMap));
 	writeln("maxreaders: ", env.maxreaders);
 	writeln("maxkeysize: ", env.maxkeysize);
 	writeln("flags: ", env.flags);

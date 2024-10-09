@@ -197,7 +197,6 @@ if (alignment && !((alignment - 1) & alignment)) {
 	static assert(scoped!C3().sizeof % alignment == 0);
 	static assert(scoped!C7().sizeof % alignment == 0);
 
-	enum longAlignment = long.alignof;
 	static class C1long {
 		long long_;
 		byte byte_ = 4;
@@ -215,6 +214,7 @@ if (alignment && !((alignment - 1) & alignment)) {
 		long long_ = 7;
 	}
 
+	enum longAlignment = long.alignof;
 	static assert(scoped!C1long().sizeof % longAlignment == 0);
 	static assert(scoped!C2long().sizeof % longAlignment == 0);
 

@@ -429,7 +429,7 @@ struct Cursor(T) {
 
 	/// Store by cursor.
 	void save(WriteFlags flags = WriteFlags.none)
-		=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
+		=> check(mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags));
 
 	/// Delete by cursor.
 	void del(DeleteFlags flags = DeleteFlags.none)
@@ -469,7 +469,7 @@ unittest {
 
 	alias modules = AliasSeq!(lmdb_orm.traits);
 	auto db = FSDB!modules(256 << 10);
-	db.open("./test2", EnvFlags.writeMap);
+	db.open("./db/test2", EnvFlags.writeMap);
 	auto txn = db.begin();
 	txn.save(User(0, "Alice", 0));
 	txn.save(User(0, "Bob", 1));
