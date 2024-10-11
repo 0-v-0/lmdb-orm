@@ -118,7 +118,7 @@ string checkDBs(DBs...)() {
 
 		size_t[string] indices;
 		foreach (i, T; DBs) {
-			enum name = dbNameOf!T;
+			enum name = modelOf!T.name;
 			if (name in indices)
 				return "Table " ~ T.stringof ~ " has the same name as " ~
 					[staticMap!(nameOf, DBs)][indices[name]];
@@ -220,7 +220,12 @@ struct FSDB(modules...) {
 				alias t = obj.tupleof;
 				if (!t[index]) {
 					auto cur = Cursor!T(txn, dbi, CursorOp.last);
-					t[index] = cur.empty ? 1 : *cast(typeof(t[index])*)cur.key.ptr + 1;
+					alias S = typeof(t[index]);
+					S id = cur.empty ? cast(S)getSerial.min
+						: *cast(S*)cur.key.ptr + cast(S)getSerial.step;
+					if (id > cast(S)getSerial.max)
+						throw new DBException("Serial overflow");
+					t[index] = id;
 					flags |= WriteFlags.append;
 				}
 			}
@@ -292,11 +297,11 @@ struct FSDB(modules...) {
 		MDB_dbi open(T)() @trusted {
 			alias U = Unqual!T;
 			static assert(indexOf!U >= 0, "Table " ~ U.stringof ~ " not found");
-			enum flags = DBFlags.create |
-				(getSerial!U == serial.invalid ? 0 : DBFlags.integerKey);
+			enum flags = DBFlags.create | modelOf!U.flags
+				(getSerial!U == serial.invalid ? DBFlags.none : DBFlags.integerKey);
 			auto dbi = &db.dbs[indexOf!U];
 			if (!*dbi)
-				check(mdb_dbi_open(txn, dbNameOf!U, flags, dbi));
+				check(mdb_dbi_open(txn, modelOf!U.name, flags, dbi));
 			return *dbi;
 		}
 
@@ -467,8 +472,7 @@ unittest {
 	import std.meta;
 	import std.stdio;
 
-	alias modules = AliasSeq!(lmdb_orm.traits);
-	auto db = FSDB!modules(256 << 10);
+	auto db = DB(256 << 10);
 	db.open("./db/test2", EnvFlags.writeMap);
 	auto txn = db.begin();
 	txn.save(User(0, "Alice", 0));

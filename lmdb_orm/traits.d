@@ -2,6 +2,7 @@ module lmdb_orm.traits;
 
 import std.meta;
 import std.traits;
+import lmdb_orm.oo;
 
 /// Check flags for column
 enum CheckFlags {
@@ -14,23 +15,22 @@ enum CheckFlags {
 /// Provide a custom name in the database for table
 struct model {
 	string name; /// The name of the table in the database
+	DBFlags flags; /// The flags of the table in the database
 }
 
-/// Get the name of the table in the database
-enum dbNameOf(T) = getName!(T, model);
+/// Get the model attribute of the table
+enum modelOf(T) = UDAof!(T, model);
 
 unittest {
-	import lmdb_orm.orm;
-
 	@model("Class")
 	static struct S {
 		string name;
 	}
 
-	static assert(dbNameOf!(User) == "User");
-	static assert(dbNameOf!(Company) == "Company");
-	static assert(dbNameOf!(S) == "Class");
-	static assert(dbNameOf!(model) == "");
+	static assert(modelOf!(User).name == "User");
+	static assert(modelOf!(Company).name == "Company");
+	static assert(modelOf!(S).name == "Class");
+	static assert(modelOf!(model).name == "");
 }
 
 /// Mark a specific column as serial on the table
@@ -56,6 +56,8 @@ template getSerial(alias x) {
 				static assert(i == 0, "Serial column must be the first column");
 				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
 				enum getSerial = .getSerial!f;
+				static assert(getSerial.min < getSerial.max, "Invalid serial range");
+				static assert(getSerial.max < typeof(f).max, "Serial max value is too large");
 				enum index = i;
 			}
 		}
@@ -185,13 +187,13 @@ template getUDAValues(alias x, UDA, UDA defaultVal = UDA.init) {
 	alias getUDAValues = staticMap!(toVal, getUDAs!(x, UDA));
 }
 
-template getName(alias x, UDA, UDA defaultVal = UDA(x.stringof)) {
+template UDAof(alias x, UDA, UDA defaultVal = UDA(x.stringof)) {
 	alias udas = getUDAValues!(x, UDA, defaultVal);
 	static assert(udas.length < 2, "Only one " ~ UDA.stringof ~ " is allowed for " ~ x.stringof);
 	static if (udas.length)
-		enum getName = udas[0].name;
+		enum UDAof = udas[0];
 	else
-		enum getName = null;
+		enum UDAof = defaultVal;
 }
 
 alias getAttrs(alias symbol, string member) =
@@ -249,6 +251,9 @@ pure @nogc @safe {
 
 version (unittest):
 import std.stdio;
+import lmdb_orm.orm;
+
+alias DB = FSDB!(lmdb_orm.traits);
 
 @model
 struct User {
