@@ -9,7 +9,8 @@ enum CheckFlags {
 	none,
 	unique = 1,
 	foreign = 2,
-	all = CheckFlags.unique | CheckFlags.foreign,
+	empty = 4,
+	all = CheckFlags.unique | CheckFlags.foreign | CheckFlags.empty,
 }
 
 /// Provide a custom name in the database for table
@@ -38,7 +39,7 @@ struct serial {
 	enum invalid = serial(0, 0, 0);
 
 	ulong min = 1; /// The minimum value of the serial
-	ulong max = ulong.max; /// The maximum value of the serial
+	ulong max = long.max; /// The maximum value of the serial
 	ulong step = 1; /// The step of the serial
 }
 
@@ -57,7 +58,7 @@ template getSerial(alias x) {
 				static assert(isNumeric!(typeof(f)), "Serial column must be numeric");
 				enum getSerial = .getSerial!f;
 				static assert(getSerial.min < getSerial.max, "Invalid serial range");
-				static assert(getSerial.max < typeof(f).max, "Serial max value is too large");
+				static assert(getSerial.max <= typeof(f).max, "Serial max value is too large");
 				enum index = i;
 			}
 		}
@@ -104,6 +105,10 @@ enum nonEmpty;
 
 /// foreign key
 template foreign(alias field) {
+	static assert(isPOD!(__traits(parent, field)), "Field must be a column");
+	static assert(isPK!field || hasUDA!(field, unique), "Foreign key must be primary key or unique");
+	// TODO: check compound primary key
+	struct foreign;
 }
 
 alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
@@ -193,7 +198,7 @@ template UDAof(alias x, UDA, UDA defaultVal = UDA(x.stringof)) {
 	static if (udas.length)
 		enum UDAof = udas[0];
 	else
-		enum UDAof = defaultVal;
+		enum UDAof = UDA();
 }
 
 alias getAttrs(alias symbol, string member) =
@@ -258,24 +263,26 @@ alias DB = FSDB!(lmdb_orm.traits);
 @model
 struct User {
 	@serial long id;
-	@unique string name;
+	@unique @nonEmpty string name;
 	@foreign!(Company.id) long companyID;
 	long createdAt;
 	long updatedAt;
 
 	void onSave(scope Next next) {
 		if (next) {
+			if (!createdAt)
+				createdAt = now();
 			updatedAt = now();
 			next();
 		}
-		createdAt = now();
 	}
 }
 
 @model
 struct Company {
 	@serial long id;
-	@unique string name;
+	@unique @nonEmpty string name;
+	string address;
 
 	void onDelete(scope Next next) {
 		writeln("Company ", id, " is deleted");

@@ -15,17 +15,20 @@ template Index(string name) {
 /// Unique index
 template UniqueIndices(Tables...) {
 	import std.meta;
+	import std.traits;
 
 	alias UniqueIndices = AliasSeq!();
 	static foreach (T; Tables) {
 		static foreach (alias x; T.tupleof) {
-			static if (UDAof!(x, unique)) {
-				UniqueIndices = AliasSeq!(UniqueIndices,
-					Index!(modelOf!T.name ~ "." ~ UDAof!(x, unique).name));
+			static if (UDAof!(x, unique).name.length) {
+				static assert(!hasUDA!(x, PK), "Primary key cannot be unique");
+				UniqueIndices = AliasSeq!(UniqueIndices, UniqueIndex!(T, x));
 			}
 		}
 	}
 }
+
+package alias UniqueIndex(T, alias x) = Index!(modelOf!T.name ~ "." ~ UDAof!(x, unique).name);
 
 /// Inverted index
 template InvIndex(string name, alias x) if (getSerial!(__traits(parent, x)) != serial.invalid) {

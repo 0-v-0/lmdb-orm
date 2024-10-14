@@ -1,5 +1,6 @@
 module lmdb_orm.proxy;
 
+import lmdb_orm.oo;
 import lmdb_orm.traits;
 import std.meta;
 import std.traits;
@@ -75,6 +76,8 @@ struct Proxy(T) if (isPOD!T) {
 				enum offsets = offsets!(T, filter);
 				enum offset = offsets[i];
 				assert(offset + f.sizeof <= a.length, "offset out of range");
+				if (_cur.checkFlags & CheckFlags.empty)
+					checkEmpty!f(value);
 				auto p = cast(typeof(f)*)(a.ptr + offset);
 				static if (isDynamicArray!(typeof(f))) {
 					if (i < (_m & ~DIRTY))

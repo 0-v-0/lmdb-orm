@@ -115,6 +115,9 @@ T deserialize(T, P)(ref P pair) @trusted {
 string checkDBs(DBs...)() {
 	if (__ctfe) {
 		enum nameOf(T) = T.stringof;
+		struct Tuple(T...) {
+			T expand;
+		}
 
 		size_t[string] indices;
 		foreach (i, T; DBs) {
@@ -122,34 +125,15 @@ string checkDBs(DBs...)() {
 			if (name in indices)
 				return "Table " ~ T.stringof ~ " has the same name as " ~
 					[staticMap!(nameOf, DBs)][indices[name]];
+			alias E = Tuple!(typeof(T.tupleof)).tupleof;
+			foreach (j, alias f; T.tupleof) {
+				if (f.offsetof != E[i].offsetof)
+					return "Field " ~ fullyQualifiedName!f ~ " of " ~ T.stringof ~ " is out of order";
+			}
 			indices[name] = i;
 		}
 	}
 	return null;
-}
-
-void onUpdate(T)(MDB_txn* txn, MDB_dbi dbi, ref T obj) {
-	// TODO: check foreign key constraints
-	foreach (i, ref x; obj.tupleof) {
-		static if (hasUDA!(T.tupleof[i], unique)) {
-			int rc = mdb_put(txn, dbi, cast(MDB_val*)&bytes, &a.m,
-				WriteFlags.noOverwrite | WriteFlags.reserve);
-			if (rc == MDB_KEYEXIST)
-				throw new DBException(
-					"Column " ~ fullyQualifiedName!(T.tupleof[i]) ~ " must be unique");
-		}
-		alias fkeys = getUDAs!(T.tupleof[i], foreign);
-		static if (fkeys.length) {
-			foreach (fk; fkeys) {
-				pragma(msg, "foreign key: " ~ fk);
-			}
-		}
-		static if (hasUDA!(T.tupleof[i], nonEmpty)) {
-			if (x == typeof(x).init)
-				throw new DBException("Column " ~ fullyQualifiedName!(
-						T.tupleof[i]) ~ " cannot be empty");
-		}
-	}
 }
 
 union Arr {
@@ -160,15 +144,22 @@ union Arr {
 @property ref mark(MDB_val m)
 	=> (cast(ubyte*)m.mv_data)[m.mv_size - 1];
 
+pragma(inline, true) static void checkEmpty(alias f)(ref typeof(f) val) {
+	static if (hasUDA!(f, nonEmpty))
+		if (val == typeof(f).init)
+			throw new DBException("Column " ~ fullyQualifiedName!f ~ " cannot be empty");
+}
+
 /// name of the blob database
 enum blobDbName = "#blob";
 
 /// Fixed-Schema Database
-struct FSDB(modules...) {
+public struct FSDB(modules...) {
 	alias Tables = getTables!modules;
 	/// Maximum number of databases for the environment
 	enum maxdbs = DBs.length;
 
+	/// A transaction handle.
 	struct Txn {
 		private MDB_txn* txn;
 
@@ -208,53 +199,6 @@ struct FSDB(modules...) {
 		@disable this(this);
 	private:
 		void buildIndex(T)() {
-		}
-
-		void store(T)(MDB_dbi dbi, ref T obj) @trusted {
-			alias filter = templateNot!isPK;
-
-			scope dg = &intern;
-			mixin getSerial!T;
-			auto flags = WriteFlags.reserve;
-			static if (getSerial != serial.invalid) {
-				alias t = obj.tupleof;
-				if (!t[index]) {
-					auto cur = Cursor!T(txn, dbi, CursorOp.last);
-					alias S = typeof(t[index]);
-					S id = cur.empty ? cast(S)getSerial.min
-						: *cast(S*)cur.key.ptr + cast(S)getSerial.step;
-					if (id > cast(S)getSerial.max)
-						throw new DBException("Serial overflow");
-					t[index] = id;
-					flags |= WriteFlags.append;
-				}
-			}
-			Arr a;
-			{
-				mixin serialize!(obj, isPK, dg);
-				enum size = byteLen!(T, filter);
-				static if (size) {
-					a.m.mv_size = size;
-				} else {
-					a.m.mv_size = byteLen!(filter, dg, T)(obj);
-				}
-
-				auto key = cast(MDB_val*)&bytes;
-				int rc = mdb_put(txn, dbi, key, &a.m,
-					WriteFlags.noOverwrite | flags);
-				if (rc == MDB_KEYEXIST) {
-					rc = mdb_put(txn, dbi, key, &a.m, flags);
-					check(rc);
-				} else {
-					check(rc);
-					static if (__traits(getOverloads, obj, "onSave").length)
-						obj.onSave(null);
-				}
-			}
-			{
-				auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-				mixin serialize!(obj, filter, dg, false);
-			}
 		}
 
 		void intern(ref Val data) @trusted {
@@ -297,15 +241,113 @@ struct FSDB(modules...) {
 		MDB_dbi open(T)() @trusted {
 			alias U = Unqual!T;
 			static assert(indexOf!U >= 0, "Table " ~ U.stringof ~ " not found");
-			enum flags = DBFlags.create | modelOf!U.flags
+			enum flags = DBFlags.create | modelOf!U.flags |
 				(getSerial!U == serial.invalid ? DBFlags.none : DBFlags.integerKey);
 			auto dbi = &db.dbs[indexOf!U];
+			pragma(msg, "open " ~ modelOf!U.name);
 			if (!*dbi)
 				check(mdb_dbi_open(txn, modelOf!U.name, flags, dbi));
 			return *dbi;
 		}
 
+		void store(T)(MDB_dbi dbi, ref T obj) @trusted {
+			alias filter = templateNot!isPK;
+
+			mixin getSerial!T;
+			auto flags = WriteFlags.reserve;
+			static if (getSerial != serial.invalid) {
+				alias t = obj.tupleof;
+				if (!t[index]) {
+					auto cur = Cursor!T(txn, dbi, CursorOp.last, checkFlags);
+					alias S = typeof(t[index]);
+					S id = cur.empty ? cast(S)getSerial.min
+						: *cast(S*)cur.key.ptr + cast(S)getSerial.step;
+					if (id > cast(S)getSerial.max)
+						throw new DBException("Serial overflow");
+					if (id < cast(S)getSerial.min)
+						throw new DBException("Serial underflow");
+					t[index] = id;
+					flags |= WriteFlags.append;
+				}
+			}
+			onUpdate(dbi, obj);
+			scope dg = &intern;
+			Arr a;
+			{
+				mixin serialize!(obj, isPK, dg);
+				enum size = byteLen!(T, filter);
+				static if (size) {
+					a.m.mv_size = size;
+				} else {
+					a.m.mv_size = byteLen!(filter, dg, T)(obj);
+				}
+
+				auto key = cast(MDB_val*)&bytes;
+				int rc = mdb_put(txn, dbi, key, &a.m,
+					WriteFlags.noOverwrite | flags);
+				if (rc == MDB_KEYEXIST) {
+					rc = mdb_put(txn, dbi, key, &a.m, flags);
+					check(rc);
+				} else {
+					check(rc);
+					static if (__traits(getOverloads, obj, "onSave").length)
+						obj.onSave(null);
+				}
+			}
+			{
+				auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
+				mixin serialize!(obj, filter, dg, false);
+			}
+		}
+
+		void onUpdate(T)(MDB_dbi dbi, ref T obj) @trusted {
+			if (checkFlags & CheckFlags.empty) {
+				foreach (i, ref x; obj.tupleof)
+					checkEmpty!(T.tupleof[i])(x);
+			}
+			// TODO: check foreign key constraints
+			if (checkFlags & CheckFlags.unique) {
+				scope dg = &intern;
+				foreach (i, ref x; obj.tupleof) {
+					static if (hasUDA!(T.tupleof[i], unique)) {
+						enum filter(alias x) = __traits(isSame, x, T.tupleof[i]);
+						mixin serialize!(obj, filter, dg);
+						Arr a;
+						{
+							enum size = byteLen!(T, isPK);
+							static if (size) {
+								a.m.mv_size = size;
+							} else {
+								a.m.mv_size = byteLen!(isPK, dg, T)(obj);
+							}
+						}
+						const rc = mdb_put(txn, open!(UniqueIndex!(T, T.tupleof[i])), cast(MDB_val*)&bytes,
+							cast(MDB_val*)&a.m,
+							WriteFlags.noOverwrite | WriteFlags.reserve);
+						if (rc == MDB_KEYEXIST)
+							throw new DBException("Column " ~ fullyQualifiedName!(
+									T.tupleof[i]) ~ " must be unique");
+						{
+							auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
+							mixin serialize!(obj, isPK, dg, false);
+						}
+					}
+				}
+			}
+			if (checkFlags & CheckFlags.foreign)
+				foreach (i, ref x; obj.tupleof) {
+					foreach (a; __traits(getAttributes, T.tupleof[i])) {
+						static if (is(a : foreign!f, alias f))
+							if (!exists!(__traits(parent, f), __traits(identifier, f))(x))
+								throw new DBException("Foreign key " ~ fullyQualifiedName!(
+										T.tupleof[i]) ~ " not found");
+					}
+				}
+		}
+
 	public:
+		/// Check flags for column.
+		CheckFlags checkFlags = CheckFlags.all;
 
 		/** Begin a transaction within the current transaction.
 		Params:
@@ -325,26 +367,62 @@ struct FSDB(modules...) {
 		}
 
 		auto cursor(T)(CursorOp op = CursorOp.next)
-			=> Cursor!T(txn, open!T(), op);
+			=> Cursor!T(txn, open!T(), op, checkFlags);
 
 		void save(T)(T obj) @trusted {
 			scope Next next = () @trusted {
 				const dbi = open!T();
-				onUpdate(txn, dbi, obj);
 				store(dbi, obj);
 			};
-			static if (__traits(getOverloads, obj, "onSave").length) {
-				//static assert(__traits(getParameterStorageClasses, foo, 0)[0] == "scope");
+			static if (is(typeof(obj.onSave(next)))) {
+				static foreach (sc; __traits(getParameterStorageClasses, obj.onSave(next), 0)) {
+					static if (sc == "scope")
+						enum isScope = true;
+				}
+				static assert(is(typeof(isScope)), "The first parameter of " ~ fullyQualifiedName!(
+						obj.onSave) ~ " must be scope");
 				obj.onSave(next);
 			} else {
 				next();
 			}
 		}
 
-		bool del(T)(in T obj) {
+		template exists(T) {
+			alias x = Filter!(isPK, T.tupleof);
+			bool exists(typeof(x) obj) @trusted {
+				const dbi = open!T();
+				Val val = void;
+				mixin serialize!(obj, isPK, intern);
+				const rc = mdb_get(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
+				if (rc == MDB_NOTFOUND)
+					return false;
+				check(rc);
+				return true;
+			}
+		}
+
+		template exists(T, string member) {
+			alias x = __traits(getMember, T, member);
+			bool exists(typeof(x) key) @trusted {
+				static if (isPK!x) {
+					// TODO: check compound primary key
+					const dbi = open!T();
+				} else {
+					const dbi = open!(UniqueIndex!(T, x))();
+				}
+				Val val = void;
+				const rc = mdb_get(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
+				if (rc == MDB_NOTFOUND)
+					return false;
+				check(rc);
+				return true;
+			}
+		}
+
+		bool del(T)(in T obj) @trusted {
 			const dbi = open!T();
 			mixin serialize!(obj, isPK, intern);
-			int rc = mdb_del(txn, dbi, cast(MDB_val*)&bytes, null);
+			const rc = mdb_del(txn, dbi, cast(MDB_val*)&bytes, null);
 			if (rc == MDB_NOTFOUND)
 				return false;
 			check(rc);
@@ -408,14 +486,17 @@ public:
 }
 
 struct Cursor(T) {
-	private MDB_cursor* cursor;
+	package MDB_cursor* cursor;
 	alias cursor this;
 	Val key;
 	Val val;
 	private int rc;
-	private this(MDB_txn* txn, MDB_dbi dbi, CursorOp op) {
+	CheckFlags checkFlags = CheckFlags.all;
+
+	private this(MDB_txn* txn, MDB_dbi dbi, CursorOp op, CheckFlags flags) @trusted {
 		check(mdb_cursor_open(txn, dbi, &cursor));
 		rc = cast(int)op + opOffset;
+		checkFlags = flags;
 	}
 
 	~this() @trusted {

@@ -910,23 +910,6 @@ int mdb_env_set_userctx(MDB_env* env, void* ctx) @trusted;
  */
 void* mdb_env_get_userctx(MDB_env* env) @trusted;
 
-/** @brief A callback function for most LMDB assert() failures,
- * called before printing the message and aborting.
- *
- * @param[in] env An environment handle returned by #mdb_env_create().
- * @param[in] msg The assertion message, not including newline.
- */
-alias MDB_assert_func = void function(MDB_env* env, const(char)* msg);
-
-/** Set or reset the assert() callback of the environment.
- * Disabled if liblmdb is built with NDEBUG.
- * @note This hack should become obsolete as lmdb's error handling matures.
- * @param[in] env An environment handle returned by #mdb_env_create().
- * @param[in] func An #MDB_assert_func function, or 0.
- * @return A non-zero error value on failure and 0 on success.
- */
-int mdb_env_set_assert(MDB_env* env, MDB_assert_func* func);
-
 /** @brief Create a transaction for use with the environment.
  *
  * The transaction handle may be discarded using #mdb_txn_abort() or #mdb_txn_commit().
