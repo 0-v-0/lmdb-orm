@@ -119,66 +119,114 @@ alias Next = void delegate() @safe;
 
 package:
 
+union Arr {
+	import lmdb_orm.lmdb;
+
+	Val v;
+	MDB_val m;
+	size_t[2] s;
+}
+
+struct Tuple(T...) {
+	T expand;
+}
+
+struct Partial(T, alias filter) {
+	typeof(Filter!(filter, T.tupleof)) expand;
+
+	this(ref T obj) {
+		expand = Filter!(filter, obj.tupleof);
+		//foreach (i, ref x; obj.tupleof) {
+		//	static if (filter!(T.tupleof[i]))
+		//		expand[i] = x;
+		//}
+	}
+}
+
+template keyCount(T) {
+	static foreach_reverse (i, alias x; T.tupleof) {
+		static if (is(typeof(keyCount) == void)) {
+			static if (isPK!x)
+				enum keyCount = i + 1;
+		} else
+			static assert(isPK!x, "Primary keys must be consecutive");
+	}
+	static if (is(typeof(keyCount) == void))
+		enum keyCount = 0;
+}
+
+unittest {
+	static assert(keyCount!User == 1);
+	static assert(keyCount!Company == 1);
+	static assert(keyCount!Relation == 2);
+}
+
+enum valCount(T) = T.tupleof.length - keyCount!T;
+
+/// Get the primary keys of the table
+alias PKof(alias x) = x.tupleof[0 .. keyCount!(typeof(x))];
+
+/// Get the values of the table
+alias ValOf(alias x) = x.tupleof[keyCount!(typeof(x)) .. $];
+
+struct KVSplitter(T, alias filter) {
+	Filter!(filter, T.tupleof) expand;
+	void[0] end;
+}
+
 /// threshold for inlining arrays, default 64
 // TODO
 enum lengthThreshold = size_t.max;
 
+enum isFixedSize(T...) = !anySatisfy!(isDynamicArray, T);
+
+alias Intern = void delegate(ref Val) @safe;
+
 /// Get the size of the serialized object, 0 if it is dynamic
-size_t byteLen(T, alias filter = True)() {
-	size_t size;
-	foreach (alias x; T.tupleof) {
-		static if (filter!x) {
-			static if (isArray!(typeof(x))) {
-				static assert(!hasIndirections!(typeof(x[0])), "not implemented");
-				static if (isDynamicArray!(typeof(x))) {
-					return 0;
-				} else {
-					size += x.length * typeof(x[0]).sizeof;
-				}
-			} else
-				size += x.sizeof;
-		}
+void setSize(bool key = false, T)(scope Intern intern, ref Arr a, ref T obj) {
+	static if (key)
+		alias args = AliasSeq!(obj.tupleof[0 .. keyCount!T]);
+	else
+		alias args = AliasSeq!(obj.tupleof[keyCount!T .. $]);
+	static if (isFixedSize!(typeof(args))) {
+		a.m.mv_size = Tuple!(typeof(args)).sizeof;
+	} else {
+		static if (key)
+			a.m.mv_size = byteLen!(0, keyCount!T)(obj, intern);
+		else
+			a.m.mv_size = byteLen!(keyCount!T)(obj, intern);
 	}
-	return size;
-}
-
-unittest {
-	import lmdb_orm.orm;
-
-	static assert(byteLen!(User) == 0);
-	static assert(byteLen!(Company) == 0);
-	static assert(byteLen!(Relation) == 8 + 8 + 4);
-	static assert(byteLen!(Relation, isPK) == 8 + 8);
 }
 
 /// Get the size of the serialized object
-size_t byteLen(alias filter, alias intern, T)(ref T obj) {
+size_t byteLen(size_t start, size_t end = 0, T)(ref T obj, scope Intern intern) {
 	import lmdb_orm.oo;
 
-	size_t size;
-	foreach (i, ref x; obj.tupleof) {
-		static if (filter!(T.tupleof[i])) {
-			static if (isArray!(typeof(x))) {
-				static assert(!hasIndirections!(typeof(x[0])), "not implemented");
-				static if (is(typeof(x) == E[], E)) {
-					static assert(!isMutable!E, "Element type of " ~ fullyQualifiedName!(
-							T.tupleof[i]) ~ " must be immutable");
-					if (x.length < lengthThreshold) // inline
-						size += size_t.sizeof + x.length * typeof(x[0]).sizeof;
-					else {
-						intern(*cast(Val*)&x);
-						size += Val.sizeof;
-					}
-				} else
-					size += x.sizeof;
-			} else
-				size += x.sizeof;
+	size_t size = Tuple!(typeof(T.tupleof[start .. end ? end: $])).sizeof;
+	foreach (i, ref x; obj.tupleof[start .. end ? end: $]) {
+		static if (isDynamicArray!(typeof(x))) {
+			if (x.length < lengthThreshold) // inline
+				size += x.length * typeof(x[0]).sizeof;
+			else
+				intern(*cast(Val*)&x);
 		}
 	}
 	return size;
 }
+/+
+unittest {
+	static void intern(Val) {
+	}
 
-enum True(alias x) = true;
+	auto u = User(1, "name", 1);
+	assert(byteLen!(intern, 1)(u) == 0);
+	auto c = Company(1, "name", "address");
+	static assert(byteLen!(intern, 0, 1)(c) == 8);
+	auto r = Relation(1, 2, RelationType.friend);
+	static assert(byteLen!(intern, 0, 2)(r) == 8 + 8);
+	static assert(byteLen!(intern, 0, 2)(r) == 4);
+}
++/
 enum isPOD(T) = __traits(isPOD, T);
 
 template getUDAValues(alias x, UDA, UDA defaultVal = UDA.init) {
@@ -254,8 +302,7 @@ pure @nogc @safe {
 	}
 }
 
-version (unittest):
-import std.stdio;
+version (unittest)  : import std.stdio;
 import lmdb_orm.orm;
 
 alias DB = FSDB!(lmdb_orm.traits);
@@ -298,8 +345,10 @@ enum RelationType {
 
 @model
 struct Relation {
-	@PK @foreign!(User.id) long userA;
-	@PK @foreign!(User.id) long userB;
+	@PK @foreign!(User.id) {
+		long userA;
+		long userB;
+	}
 	RelationType type;
 
 	void onSave(scope Next next) {

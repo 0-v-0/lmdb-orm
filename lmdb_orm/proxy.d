@@ -7,81 +7,84 @@ import std.traits;
 
 private enum DIRTY = size_t(1) << (8 * size_t.sizeof - 1);
 
-struct Proxy(T) if (isPOD!T) {
+struct Proxy(T, bool readonly = false) if (isPOD!T) {
 	package Cursor!T* _cur;
-	private size_t _m;
+	private {
+		static if (!readonly)
+			size_t _m;
+		enum _keyCount = keyCount!T;
+		alias K = Tuple!(typeof(T.tupleof[0 .. _keyCount]));
+		alias V = Tuple!(typeof(T.tupleof[_keyCount .. $]));
+	}
 	package this(ref Cursor!T c) {
 		_cur = &c;
-		_m = size_t.max & ~DIRTY;
+		static if (!readonly)
+			_m = size_t.max & ~DIRTY;
 	}
 
-	~this() @trusted {
-		import lmdb_orm.oo;
+	static if (!readonly)
+		 ~this() @trusted {
+			import lmdb_orm.oo;
 
-		if (_m & DIRTY) {
-			auto flags = WriteFlags.current;
-			const index = _m & ~DIRTY;
-			if (index < T.tupleof.length) {
-				enum end = offsets[$ - 1];
-				size_t size = end;
+			if (_m & DIRTY) {
+				auto flags = WriteFlags.current;
+				const index = _m & ~DIRTY;
+				if (index < T.tupleof.length) {
+					size_t size = V.sizeof;
 
-				foreach (i, alias f; T.tupleof) {
-					if (i >= index)
-						static if (!isPK!f && isDynamicArray!(typeof(f))) {
-							size += *cast(size_t*)(_cur.value.ptr + offsets[i]);
+					foreach (i, alias f; V.tupleof) {
+						static if (i >= _keyCount) {
+							if (i >= index)
+								static if (isDynamicArray!(typeof(f)))
+									size += *cast(size_t*)(
+										_cur.value.ptr + f.offsetof) * typeof(f[0]).sizeof;
 						}
+					}
+					// TODO: update
+					if (size != _cur.value.length) {
+						_cur.value.length = size;
+					}
 				}
-				// TODO: update
-				if (size != _cur.value.length) {
-					_cur.value.length = size;
-				}
+				_cur.save(flags);
 			}
-			_cur.save(flags);
 		}
-	}
 
 	@disable this(this);
 
 @property:
 	static foreach (i, alias f; T.tupleof) {
-		static if (isPK!f) {
+		static if (i < _keyCount) {
 			alias a = _cur.key;
-			alias filter = isPK;
+			alias P = K;
 		} else {
 			alias a = _cur.value;
-			alias filter = templateNot!isPK;
+			alias P = V;
 		}
 		mixin("auto ", f.stringof, q{() @trusted {
-			enum offsets = offsets!(T, filter);
-			enum offset = offsets[i];
+			enum offset = P.tupleof[i].offsetof;
 			assert(offset + f.sizeof <= a.length, "offset out of range");
 			static if (isDynamicArray!(typeof(f))) {
-				enum end = offsets[$ - 1];
-				union Arr {
-					typeof(f) v;
-					struct {
-						size_t length;
-						size_t p;
-					};
-				}
+				enum end = P.sizeof;
 
 				Arr res = *cast(Arr*)(a.ptr + offset);
-				res.p += cast(size_t)a.ptr;
+				if (end <= res.s[1] && res.s[1] <= a.length)
+					res.s[1] += cast(size_t)a.ptr;
+				else
+					assert(0, "invalid pointer");
 				return res.v;
 			}
 			return *cast(typeof(f)*)(a.ptr + offset);
 		}});
-		static if (!isPK!f)
+		static if (!readonly && i >= _keyCount)
 			mixin("void ", f.stringof, q{(typeof(f) value) @trusted {
-				enum offsets = offsets!(T, filter);
-				enum offset = offsets[i];
+				enum offset = P.tupleof[i].offsetof;
 				assert(offset + f.sizeof <= a.length, "offset out of range");
 				if (_cur.checkFlags & CheckFlags.empty)
 					checkEmpty!f(value);
 				auto p = cast(typeof(f)*)(a.ptr + offset);
 				static if (isDynamicArray!(typeof(f))) {
 					if (i < (_m & ~DIRTY))
-						_m = i | DIRTY;
+						_m = (i - _keyCount) | DIRTY;
 				} else {
 					_m |= DIRTY;
 				}
@@ -97,11 +100,11 @@ unittest {
 
 private:
 auto offsets(T, alias filter)() {
-	size_t[] res = [0];
+	size_t[Filter!(filter, T.tupleof).length] res;
 	if (__ctfe)
-		foreach (alias f; T.tupleof) {
+		foreach (i, alias f; T.tupleof) {
 			static if (filter!f) {
-				res ~= res[$ - 1] + f.sizeof;
+				res[i] = f.offsetof;
 			}
 		}
 	return res;

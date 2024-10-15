@@ -20,56 +20,48 @@ class DBException : Exception {
 }
 
 private:
-@model(blobDbName)
+@model(blobDbName, DBFlags.integerKey)
 struct Blob;
 
-template serialize(alias obj, alias filter, alias intern, bool alloc = true) {
-	enum L = byteLen!(T, filter);
-	static if (L) {
-		enum length = L;
-		ubyte[L] buf = void;
-		static if (alloc)
-			auto p = buf.ptr;
-		// TODO: optimize for continuous key
+template serialize(alias intern, bool alloc, alias obj,
+	size_t start, size_t end = obj.tupleof.length) {
+	alias args = AliasSeq!(obj.tupleof[start .. end]);
+	alias P = Tuple!(typeof(args));
+	static if (isFixedSize!(typeof(args))) {
+		auto bytes = Arr((cast(void*)&obj)[0 .. P.sizeof]).m;
 	} else {
-		const length = byteLen!(filter, intern)(obj);
+		const length = byteLen!(start, end)(obj, intern);
 		static if (alloc)
-			auto p = cast(ubyte*)alloca(length);
-	}
-	auto bytes = {
-		size_t i;
-		alias T = typeof(obj);
-		foreach (I, ref x; obj.tupleof) {
-			static if (filter!(T.tupleof[I])) {
+			auto p = alloca(length);
+		auto bytes = {
+			size_t i = P.sizeof;
+			foreach (I, ref x; obj.tupleof[start .. end]) {
+				//static assert(__traits(isRef, args[I]), "Argument " ~ I.stringof ~ " is not a reference");
 				alias U = typeof(x);
 				alias O = OriginalType!U;
 				static if (isArray!O) {
 					static assert(!hasIndirections!(typeof(x[0])), "not implemented");
 					static if (is(O == E[], E)) {
 						static assert(!isMutable!E, "Element type of " ~ fullyQualifiedName!(
-								T.tupleof[I]) ~ " must be immutable");
+								args[I]) ~ " must be immutable");
 						if (x.length < lengthThreshold) { // inline
-							assert(i + size_t.sizeof + x.length * E.sizeof <= length);
-							// TODO: handle unaligned loads
-							*cast(size_t*)(p + i) = x.length;
-							i += size_t.sizeof;
-							auto len = x.length * E.sizeof;
+							const len = x.length * E.sizeof;
+							assert(i + len <= length);
 							memcpy(p + i, x.ptr, len);
+							(cast(Arr*)&x).s[1] = i;
 							i += len;
-							continue;
 						}
-						// TODO: handle ptr
 					}
 				}
-				assert(i + U.sizeof <= length);
-				*cast(Unqual!U*)(p + i) = x;
-				i += U.sizeof;
+				enum offset = P.tupleof[I].offsetof;
+				assert(offset + U.sizeof <= length);
+				*cast(Unqual!U*)(p + offset) = x;
 			}
-		}
 
-		assert(i == length);
-		return p[0 .. i];
-	}();
+			assert(i == length);
+			return Arr(p[0 .. i]).m;
+		}();
+	}
 }
 
 T deserialize(T, P)(ref P pair) @trusted {
@@ -115,9 +107,6 @@ T deserialize(T, P)(ref P pair) @trusted {
 string checkDBs(DBs...)() {
 	if (__ctfe) {
 		enum nameOf(T) = T.stringof;
-		struct Tuple(T...) {
-			T expand;
-		}
 
 		size_t[string] indices;
 		foreach (i, T; DBs) {
@@ -127,18 +116,15 @@ string checkDBs(DBs...)() {
 					[staticMap!(nameOf, DBs)][indices[name]];
 			alias E = Tuple!(typeof(T.tupleof)).tupleof;
 			foreach (j, alias f; T.tupleof) {
-				if (f.offsetof != E[i].offsetof)
-					return "Field " ~ fullyQualifiedName!f ~ " of " ~ T.stringof ~ " is out of order";
+				static assert(!isPointer!(typeof(f)) && !isDelegate!f,
+					"Field " ~ fullyQualifiedName!f ~ " of " ~ T.stringof ~ " is a pointer");
+				if (f.offsetof != E[j].offsetof)
+					return "Field " ~ f.stringof ~ " in " ~ fullyQualifiedName!T ~ " is misaligned";
 			}
 			indices[name] = i;
 		}
 	}
 	return null;
-}
-
-union Arr {
-	Val v;
-	MDB_val m;
 }
 
 @property ref mark(MDB_val m)
@@ -251,8 +237,6 @@ public struct FSDB(modules...) {
 		}
 
 		void store(T)(MDB_dbi dbi, ref T obj) @trusted {
-			alias filter = templateNot!isPK;
-
 			mixin getSerial!T;
 			auto flags = WriteFlags.reserve;
 			static if (getSerial != serial.invalid) {
@@ -274,29 +258,22 @@ public struct FSDB(modules...) {
 			scope dg = &intern;
 			Arr a;
 			{
-				mixin serialize!(obj, isPK, dg);
-				enum size = byteLen!(T, filter);
-				static if (size) {
-					a.m.mv_size = size;
-				} else {
-					a.m.mv_size = byteLen!(filter, dg, T)(obj);
-				}
-
-				auto key = cast(MDB_val*)&bytes;
-				int rc = mdb_put(txn, dbi, key, &a.m,
+				mixin serialize!(dg, true, obj, 0, keyCount!T);
+				setSize(dg, a, obj);
+				int rc = mdb_put(txn, dbi, &bytes, &a.m,
 					WriteFlags.noOverwrite | flags);
 				if (rc == MDB_KEYEXIST) {
-					rc = mdb_put(txn, dbi, key, &a.m, flags);
+					rc = mdb_put(txn, dbi, &bytes, &a.m, flags);
 					check(rc);
 				} else {
 					check(rc);
-					static if (__traits(getOverloads, obj, "onSave").length)
+					static if (is(typeof(obj.onSave(next))))
 						obj.onSave(null);
 				}
 			}
 			{
 				auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-				mixin serialize!(obj, filter, dg, false);
+				mixin serialize!(dg, false, obj, keyCount!T);
 			}
 		}
 
@@ -310,18 +287,10 @@ public struct FSDB(modules...) {
 				scope dg = &intern;
 				foreach (i, ref x; obj.tupleof) {
 					static if (hasUDA!(T.tupleof[i], unique)) {
-						enum filter(alias x) = __traits(isSame, x, T.tupleof[i]);
-						mixin serialize!(obj, filter, dg);
+						mixin serialize!(dg, true, obj, i, i + 1);
 						Arr a;
-						{
-							enum size = byteLen!(T, isPK);
-							static if (size) {
-								a.m.mv_size = size;
-							} else {
-								a.m.mv_size = byteLen!(isPK, dg, T)(obj);
-							}
-						}
-						const rc = mdb_put(txn, open!(UniqueIndex!(T, T.tupleof[i])), cast(MDB_val*)&bytes,
+						setSize!true(dg, a, obj);
+						const rc = mdb_put(txn, open!(UniqueIndex!(T, T.tupleof[i])), &bytes,
 							cast(MDB_val*)&a.m,
 							WriteFlags.noOverwrite | WriteFlags.reserve);
 						if (rc == MDB_KEYEXIST)
@@ -329,7 +298,7 @@ public struct FSDB(modules...) {
 									T.tupleof[i]) ~ " must be unique");
 						{
 							auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
-							mixin serialize!(obj, isPK, dg, false);
+							mixin serialize!(dg, false, obj, 0, keyCount!T);
 						}
 					}
 				}
@@ -387,31 +356,18 @@ public struct FSDB(modules...) {
 			}
 		}
 
-		template exists(T) {
-			alias x = Filter!(isPK, T.tupleof);
-			bool exists(typeof(x) obj) @trusted {
-				const dbi = open!T();
-				Val val = void;
-				mixin serialize!(obj, isPK, intern);
-				const rc = mdb_get(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
-				if (rc == MDB_NOTFOUND)
-					return false;
-				check(rc);
-				return true;
-			}
-		}
-
 		template exists(T, string member) {
-			alias x = __traits(getMember, T, member);
-			bool exists(typeof(x) key) @trusted {
-				static if (isPK!x) {
+			bool exists(typeof(__traits(getMember, T, member)) key) @trusted {
+				static if (isPK!(__traits(getMember, T, member))) {
 					// TODO: check compound primary key
 					const dbi = open!T();
 				} else {
 					const dbi = open!(UniqueIndex!(T, x))();
 				}
+				auto obj = Tuple!(typeof(key))(key);
+				mixin serialize!(intern, true, obj, 0, keyCount!T);
 				Val val = void;
-				const rc = mdb_get(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val);
+				const rc = mdb_get(txn, dbi, &bytes, cast(MDB_val*)&val);
 				if (rc == MDB_NOTFOUND)
 					return false;
 				check(rc);
@@ -421,8 +377,8 @@ public struct FSDB(modules...) {
 
 		bool del(T)(in T obj) @trusted {
 			const dbi = open!T();
-			mixin serialize!(obj, isPK, intern);
-			const rc = mdb_del(txn, dbi, cast(MDB_val*)&bytes, null);
+			mixin serialize!(intern, true, obj, 0, keyCount!T);
+			const rc = mdb_del(txn, dbi, &bytes, null);
 			if (rc == MDB_NOTFOUND)
 				return false;
 			check(rc);
@@ -556,6 +512,7 @@ unittest {
 	auto db = DB(256 << 10);
 	db.open("./db/test2", EnvFlags.writeMap);
 	auto txn = db.begin();
+	txn.save(Company(0, "Company A", "Address A"));
 	txn.save(User(0, "Alice", 0));
 	txn.save(User(0, "Bob", 1));
 	txn.commit();
