@@ -3,17 +3,7 @@ module lmdb_orm.index;
 import lmdb_orm.oo;
 import lmdb_orm.traits;
 
-/// Index
-template Index(string name) {
-	@model(name)
-	struct Index {
-		@PK Val key;
-		Val val;
-	}
-}
-
-/// Unique index
-template UniqueIndices(Tables...) {
+package template UniqueIndices(Tables...) {
 	import std.meta;
 	import std.traits;
 
@@ -28,7 +18,14 @@ template UniqueIndices(Tables...) {
 	}
 }
 
-package alias UniqueIndex(T, alias x) = Index!(modelOf!T.name ~ "." ~ UDAof!(x, unique).name);
+/// Unique index
+template UniqueIndex(T, alias x){
+	@model(modelOf!T.name ~ "." ~ UDAof!(x, unique).name)
+	struct UniqueIndex {
+		@PK typeof(x) key;
+		TKey!T val;
+	}
+}
 
 /// Inverted index
 template InvIndex(string name, alias x) if (getSerial!(__traits(parent, x)) != serial.invalid) {

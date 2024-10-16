@@ -3,13 +3,21 @@ module lmdb_orm.traits;
 import std.meta;
 import std.traits;
 import lmdb_orm.oo;
+import lmdb_orm.lmdb : MDB_txn;
+
+version (LDC)
+	import ldc.attributes;
+else
+	private enum restrict;
 
 /// Check flags for column
 enum CheckFlags {
 	none,
 	unique = 1,
-	foreign = 2,
-	empty = 4,
+	foreignTo = 2,
+	foreignFrom = 4,
+	foreign = foreignTo | foreignFrom,
+	empty = 8,
 	all = CheckFlags.unique | CheckFlags.foreign | CheckFlags.empty,
 }
 
@@ -51,7 +59,7 @@ template getSerial(alias x) {
 		alias getSerial = udas[0];
 		enum index = -1;
 	}
-	static if (is(x)) {
+	static if (is(x) && isPOD!x) {
 		static foreach (i, alias f; x.tupleof) {
 			static if (getSerial!f != serial.invalid) {
 				static assert(i == 0, "Serial column must be the first column");
@@ -104,11 +112,11 @@ struct unique {
 enum nonEmpty;
 
 /// foreign key
-template foreign(alias field) {
+template FK(alias field) {
 	static assert(isPOD!(__traits(parent, field)), "Field must be a column");
 	static assert(isPK!field || hasUDA!(field, unique), "Foreign key must be primary key or unique");
 	// TODO: check compound primary key
-	struct foreign;
+	struct FK;
 }
 
 alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
@@ -131,18 +139,6 @@ struct Tuple(T...) {
 	T expand;
 }
 
-struct Partial(T, alias filter) {
-	typeof(Filter!(filter, T.tupleof)) expand;
-
-	this(ref T obj) {
-		expand = Filter!(filter, obj.tupleof);
-		//foreach (i, ref x; obj.tupleof) {
-		//	static if (filter!(T.tupleof[i]))
-		//		expand[i] = x;
-		//}
-	}
-}
-
 template keyCount(T) {
 	static foreach_reverse (i, alias x; T.tupleof) {
 		static if (is(typeof(keyCount) == void)) {
@@ -161,13 +157,8 @@ unittest {
 	static assert(keyCount!Relation == 2);
 }
 
-enum valCount(T) = T.tupleof.length - keyCount!T;
-
-/// Get the primary keys of the table
-alias PKof(alias x) = x.tupleof[0 .. keyCount!(typeof(x))];
-
-/// Get the values of the table
-alias ValOf(alias x) = x.tupleof[keyCount!(typeof(x)) .. $];
+/// Get the type of the primary keys of the table
+alias TKey(T) = typeof(T.tupleof[0 .. keyCount!T]);
 
 struct KVSplitter(T, alias filter) {
 	Filter!(filter, T.tupleof) expand;
@@ -180,10 +171,10 @@ enum lengthThreshold = size_t.max;
 
 enum isFixedSize(T...) = !anySatisfy!(isDynamicArray, T);
 
-alias Intern = void delegate(ref Val) @safe;
+alias Intern = void function(MDB_txn*, ref Val) @safe;
 
-/// Get the size of the serialized object, 0 if it is dynamic
-void setSize(bool key = false, T)(scope Intern intern, ref Arr a, ref T obj) {
+/// Get the size of the serialized object
+void setSize(bool key = false, T)(@restrict ref Arr a, @restrict ref T obj, MDB_txn* txn, Intern intern = null) {
 	static if (key)
 		alias args = AliasSeq!(obj.tupleof[0 .. keyCount!T]);
 	else
@@ -192,42 +183,37 @@ void setSize(bool key = false, T)(scope Intern intern, ref Arr a, ref T obj) {
 		a.m.mv_size = Tuple!(typeof(args)).sizeof;
 	} else {
 		static if (key)
-			a.m.mv_size = byteLen!(0, keyCount!T)(obj, intern);
+			a.m.mv_size = byteLen!(0, keyCount!T)(obj, txn, intern);
 		else
-			a.m.mv_size = byteLen!(keyCount!T)(obj, intern);
+			a.m.mv_size = byteLen!(keyCount!T)(obj, txn, intern);
 	}
 }
 
 /// Get the size of the serialized object
-size_t byteLen(size_t start, size_t end = 0, T)(ref T obj, scope Intern intern) {
-	import lmdb_orm.oo;
-
+size_t byteLen(size_t start, size_t end = 0, T)(@restrict ref T obj, MDB_txn* txn, Intern intern = null) {
 	size_t size = Tuple!(typeof(T.tupleof[start .. end ? end: $])).sizeof;
 	foreach (i, ref x; obj.tupleof[start .. end ? end: $]) {
 		static if (isDynamicArray!(typeof(x))) {
 			if (x.length < lengthThreshold) // inline
 				size += x.length * typeof(x[0]).sizeof;
-			else
-				intern(*cast(Val*)&x);
+			else if (intern)
+				intern(txn, *cast(Val*)&x);
 		}
 	}
 	return size;
 }
-/+
-unittest {
-	static void intern(Val) {
-	}
 
-	auto u = User(1, "name", 1);
-	assert(byteLen!(intern, 1)(u) == 0);
-	auto c = Company(1, "name", "address");
-	static assert(byteLen!(intern, 0, 1)(c) == 8);
+unittest {
+	auto u = User(1, "foo", 1);
+	assert(byteLen!(1)(u, null) == 16 + 8 * 3 + "foo".length);
+	auto c = Company(1, "bar", "address");
+	assert(byteLen!(0, 1)(c, null) == 8);
 	auto r = Relation(1, 2, RelationType.friend);
-	static assert(byteLen!(intern, 0, 2)(r) == 8 + 8);
-	static assert(byteLen!(intern, 0, 2)(r) == 4);
+	assert(byteLen!(0, 2)(r, null) == 8 + 8);
+	assert(byteLen!(2, 3)(r, null) == 4);
 }
-+/
-enum isPOD(T) = __traits(isPOD, T);
+
+enum isPOD(alias x) = __traits(isPOD, x);
 
 template getUDAValues(alias x, UDA, UDA defaultVal = UDA.init) {
 	template toVal(alias uda) {
@@ -311,7 +297,7 @@ alias DB = FSDB!(lmdb_orm.traits);
 struct User {
 	@serial long id;
 	@unique @nonEmpty string name;
-	@foreign!(Company.id) long companyID;
+	@FK!(Company.id) long companyID;
 	long createdAt;
 	long updatedAt;
 
@@ -345,7 +331,7 @@ enum RelationType {
 
 @model
 struct Relation {
-	@PK @foreign!(User.id) {
+	@PK @FK!(User.id) {
 		long userA;
 		long userB;
 	}
