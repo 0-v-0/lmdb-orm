@@ -123,9 +123,33 @@ alias getTables(modules...) = Filter!(isPOD, getSymbolsWith!(model, modules));
 
 enum isPK(alias x) = hasUDA!(x, PK) || hasUDA!(x, serial);
 
-alias Next = void delegate() @safe;
+alias Save = void delegate() @safe;
+alias Del = bool delegate() @safe;
 
 package:
+
+template CallNext(T, string name) {
+	static if (is(typeof(next())))
+		alias args = AliasSeq!(obj, next);
+	else
+		alias args = obj;
+	static if (is(typeof(__traits(getMember, T, name)(args)))) {
+		alias func = __traits(getMember, T, name);
+		static foreach (sc; __traits(getParameterStorageClasses, func(args), 1)) {
+			static if (sc == "scope")
+				enum isScope = true;
+		}
+		static assert(is(typeof(isScope)), "The first parameter of " ~
+				fullyQualifiedName!func ~ " must be scope");
+		int _ = { func(obj, next); return 0; }();
+	} else static if (is(typeof(next()))) {
+		static if (is(typeof(next()) == void)) {
+			int _ = { next(); return 0; }();
+		} else {
+			const ret = next();
+		}
+	}
+}
 
 union Arr {
 	import lmdb_orm.lmdb;
@@ -301,11 +325,11 @@ struct User {
 	long createdAt;
 	long updatedAt;
 
-	void onSave(scope Next next) {
+	static void onSave(T)(T user, scope Save next) {
 		if (next) {
-			if (!createdAt)
-				createdAt = now();
-			updatedAt = now();
+			if (!user.createdAt)
+				user.createdAt = now();
+			user.updatedAt = now();
 			next();
 		}
 	}
@@ -317,9 +341,9 @@ struct Company {
 	@unique @nonEmpty string name;
 	string address;
 
-	void onDelete(scope Next next) {
+	static bool onDelete(long id, scope Del next) {
 		writeln("Company ", id, " is deleted");
-		next();
+		return next();
 	}
 }
 
@@ -337,8 +361,8 @@ struct Relation {
 	}
 	RelationType type;
 
-	void onSave(scope Next next) {
-		if (type < RelationType.min || type > RelationType.max)
+	static void onSave(T)(T r, scope Next next) {
+		if (r.type < RelationType.min || r.type > RelationType.max)
 			throw new Exception("Invalid relation type");
 
 		next();

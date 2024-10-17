@@ -102,34 +102,11 @@ public struct FSDB(modules...) {
 			=> Cursor!(T, true)(txn, openDB!T(txn), op, checkFlags);
 
 		void save(T)(T obj) @trusted {
-			scope Next next = { store(obj); };
-			static if (is(typeof(obj.onSave(next)))) {
-				static foreach (sc; __traits(getParameterStorageClasses, obj.onSave(next), 0)) {
-					static if (sc == "scope")
-						enum isScope = true;
-				}
-				static assert(is(typeof(isScope)), "The first parameter of " ~ fullyQualifiedName!(
-						obj.onSave) ~ " must be scope");
-				obj.onSave(next);
-			} else {
-				next();
-			}
+			scope Save next = { store(obj); };
+			mixin CallNext!(T, "onSave");
 		}
 
 	private:
-		void buildIndex(T)() {
-		}
-
-		/+ TODO
-		void vacuum() {
-			static foreach (i; 1 .. maxdbs) {
-				foreach(val; cursor!(DBs[i])) {
-					openDB!Blob(txn).set(val.key, val.val);
-				}
-			}
-			db[0].txn.commit();
-		}+/
-
 		void store(T)(ref T obj) @trusted {
 			mixin getSerial!T;
 			const dbi = openDB!T(txn);
@@ -154,15 +131,13 @@ public struct FSDB(modules...) {
 			{
 				mixin serialize!(obj, 0, keyCount!T);
 				setSize(a, obj, txn, &intern);
-				int rc = mdb_put(txn, dbi, &bytes, &a.m,
+				const rc = mdb_put(txn, dbi, &bytes, &a.m,
 					WriteFlags.noOverwrite | flags);
-				if (rc == MDB_KEYEXIST) {
-					rc = mdb_put(txn, dbi, &bytes, &a.m, flags);
+				if (rc == MDB_KEYEXIST)
+					check(mdb_put(txn, dbi, &bytes, &a.m, flags));
+				else {
 					check(rc);
-				} else {
-					check(rc);
-					static if (is(typeof(obj.onSave(next))))
-						obj.onSave(null);
+					mixin CallNext!(T, "onCreate");
 				}
 			}
 			auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
@@ -262,16 +237,20 @@ template findBy(T, string member) {
 	}
 }
 
-bool del(T)(MDB_txn* txn, TKey!T key) @trusted {
-	const dbi = openDB!T(txn);
-	auto obj = Tuple!(typeof(key))(key);
-	mixin serialize!(obj, 0);
-	const rc = mdb_del(txn, dbi, &bytes, null);
-	if (rc == MDB_NOTFOUND)
-		return false;
-	check(rc);
-	// TODO: implement cascade delete
-	return true;
+bool del(T)(MDB_txn* txn, TKey!T key) {
+	scope Del next = () @trusted {
+		const dbi = openDB!T(txn);
+		auto obj = Tuple!(typeof(key))(key);
+		mixin serialize!(obj, 0);
+		const rc = mdb_del(txn, dbi, &bytes, null);
+		if (rc == MDB_NOTFOUND)
+			return false;
+		check(rc);
+		// TODO: implement cascade delete
+		return true;
+	};
+	alias obj = key;
+	mixin CallNext!(T, "onDelete");
 }
 
 struct Cursor(T, bool proxy = false) {
@@ -493,6 +472,19 @@ MDB_dbi openDB(T)(MDB_txn* txn) @trusted {
 	return dbi;
 }
 
+void buildIndex(T)() {
+}
+
+/+ TODO
+void vacuum() {
+	static foreach (i; 1 .. maxdbs) {
+		foreach(val; cursor!(DBs[i])) {
+			openDB!Blob(txn).set(val.key, val.val);
+		}
+	}
+	db[0].txn.commit();
+}+/
+
 void intern(MDB_txn* txn, ref Val data) @trusted {
 	import lmdb_orm.xxh3;
 
@@ -580,6 +572,7 @@ unittest {
 	import std.string : cmp;
 
 	remove("./db/test2/data.mdb");
+	remove("./db/test2/lock.mdb");
 
 	auto db = DB(256 << 10);
 	db.open("./db/test2", EnvFlags.writeMap);
@@ -607,18 +600,19 @@ unittest {
 	txn.commit();
 	txn = db.begin();
 	writeln(txn.id);
-	txn.del!User(1);
+	assert(txn.del!User(1));
+	assert(txn.del!Company(2));
 	txn.commit();
 	txn = db.begin(TxnFlags.readOnly);
 	foreach (user; txn.cursor!User()) {
 		assert(user.companyID == 1);
 	}
-	txn = db.begin();
-	foreach (user; txn.mapper!User()) {
-		user.companyID = 2;
-	}
-	txn.abort();
-	txn = db.begin(TxnFlags.readOnly);
+	//txn = db.begin();
+	//foreach (user; txn.mapper!User()) {
+	//	user.companyID = 2;
+	//}
+	//txn.commit();
+	//txn = db.begin(TxnFlags.readOnly);
 	foreach (user; txn.cursor!User()) {
 		writeln(user);
 		assert(user.companyID == 1);
