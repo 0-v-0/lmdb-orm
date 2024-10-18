@@ -35,12 +35,10 @@ public struct FSDB(modules...) {
 	struct Txn {
 		private MDB_txn* txn;
 
-		alias handle this;
-		@property auto handle() => txn;
-
+		mixin Handle!txn;
 		@property {
-			ref db() @trusted
-				=> *cast(FSDB!modules*)(txn.env.userctx);
+			auto handle() => txn;
+
 			/// Get the database flags.
 			DBFlags flags(T)() @trusted {
 				uint flags = void;
@@ -56,19 +54,6 @@ public struct FSDB(modules...) {
 			}
 		}
 
-		private this(MDB_txn* t, ref FSDB!modules db)
-		in (t !is null) {
-			txn = t;
-			t.env.userctx = &db;
-		}
-		// dfmt off
-		~this() @trusted {
-			.abort(txn);
-		}
-
-		@disable this(this);
-// dfmt on
-
 		/// Check flags for column.
 		CheckFlags checkFlags = CheckFlags.all;
 
@@ -80,12 +65,12 @@ public struct FSDB(modules...) {
 		Txn begin(TxnFlags flags = TxnFlags.none) @trusted {
 			MDB_txn* t = void;
 			check(mdb_txn_begin(txn.env, txn, flags, &t));
-			return Txn(t, db);
+			return Txn(t);
 		}
 
 		/** Abort a transaction. */
 		void abort() @trusted {
-			mdb_txn_abort(txn);
+			close(txn);
 			txn = null;
 		}
 
@@ -103,10 +88,12 @@ public struct FSDB(modules...) {
 
 		void save(T)(T obj) @trusted {
 			scope Save next = { store(obj); };
-			mixin CallNext!(T, "onSave");
+			mixin CallNext!(T, "onSave", obj, next);
 		}
 
 	private:
+		alias close = mdb_txn_abort;
+
 		void store(T)(ref T obj) @trusted {
 			mixin getSerial!T;
 			const dbi = openDB!T(txn);
@@ -137,12 +124,21 @@ public struct FSDB(modules...) {
 					check(mdb_put(txn, dbi, &bytes, &a.m, flags));
 				else {
 					check(rc);
-					mixin CallNext!(T, "onCreate");
+					mixin CallNext!(T, "onCreate", obj);
 				}
 			}
 			auto p = a.m.mv_data; // @suppress(dscanner.suspicious.unused_variable)
 			mixin serialize!(obj, keyCount!T);
 		}
+
+		/+ TODO
+		void vacuum() {
+			static foreach (i; 1 .. maxdbs) {
+				foreach(val; cursor!(DBs[i])) {
+					openDB!Blob(txn).set(val.key, val.val);
+				}
+			}
+		}+/
 	}
 
 private:
@@ -165,7 +161,6 @@ public:
 		e.maxdbs = maxdbs;
 	}
 
-	@disable this(this);
 	/+
 	void open(in char[] path, EnvFlags flags = EnvFlags.none, ushort mode = defaultMode) {
 		auto cpath = cast(char*)alloca(path.length + 1);
@@ -194,10 +189,11 @@ public:
 	Txn begin(TxnFlags flags = TxnFlags.none, MDB_txn* parent = null) @trusted {
 		MDB_txn* txn = void;
 		check(mdb_txn_begin(env, parent, flags, &txn));
-		return Txn(txn, this);
+		return Txn(txn);
 	}
 }
 
+/// check if the record exists
 template exists(T, string member = null) {
 	static if (member) {
 		alias x = __traits(getMember, T, member);
@@ -220,20 +216,51 @@ template exists(T, string member = null) {
 	}
 }
 
-template findBy(T, string member) {
-	alias x = __traits(getMember, T, member);
-	T findBy(MDB_txn* txn, typeof(x) key) @trusted {
-		mixin tryGet!key;
-		check(rc);
-		return deserialize!T(bytes, val);
-	}
+static template find(alias x) {
+	static if (is(x)) {
+		alias T = x;
+		T find(MDB_txn* txn, TKey!T key) @trusted {
+			alias x = Alias!(T.tupleof[0]);
+			mixin tryGet!key;
+			check(rc);
+			return deserialize!T(*cast(Val*)&bytes, val);
+		}
+	} else {
+		alias T = __traits(parent, x);
+		T find(MDB_txn* txn, typeof(x) key) @trusted {
+			mixin tryGet!key;
+			check(rc);
+			return find!T(txn, deserialize!(TKey!T)(Arr(val).m));
+		}
 
-	T findBy(MDB_txn* txn, typeof(x) key, T defValue) @trusted {
-		mixin tryGet!key;
-		if (rc == MDB_NOTFOUND)
-			return defValue;
-		check(rc);
-		return deserialize!T(bytes, val);
+		T find(MDB_txn* txn, typeof(x) key, T defValue) @trusted {
+			mixin tryGet!key;
+			if (rc == MDB_NOTFOUND)
+				return defValue;
+			check(rc);
+			return find!T(txn, deserialize!(TKey!T)(Arr(val).m));
+		}
+	}
+}
+
+static template findP(alias x) {
+	static if (is(x)) {
+		alias T = x;
+		auto findP(MDB_txn* txn, TKey!T key) @trusted {
+			import lmdb_orm.proxy;
+
+			alias x = Alias!(T.tupleof[0]);
+			mixin tryGet!key;
+			check(rc);
+			return Proxy!T(*cast(Val*)&bytes, val);
+		}
+	} else {
+		alias T = __traits(parent, x);
+		auto findP(MDB_txn* txn, typeof(x) key) @trusted {
+			mixin tryGet!key;
+			check(rc);
+			return findP!T(txn, deserialize!(TKey!T)(Arr(val).m));
+		}
 	}
 }
 
@@ -249,8 +276,8 @@ bool del(T)(MDB_txn* txn, TKey!T key) {
 		// TODO: implement cascade delete
 		return true;
 	};
-	alias obj = key;
-	mixin CallNext!(T, "onDelete");
+	mixin CallNext!(T, "onDelete", key, next);
+	return ret;
 }
 
 struct Cursor(T, bool proxy = false) {
@@ -313,7 +340,7 @@ struct Cursor(T, bool proxy = false) {
 	static if (proxy) {
 		import lmdb_orm.proxy;
 
-		auto front() => Proxy!T(&this);
+		auto front() => Proxy!(T, false)(&this);
 	} else {
 		T front() @safe => deserialize!T(key, val);
 	}
@@ -390,17 +417,14 @@ T deserialize(T)(Val key, Val val) @trusted {
 	alias V = Tuple!(typeof(T.tupleof[_keyCount .. $]));
 	if (key.length < K.sizeof)
 		throw new DBException("Key length mismatch");
-	if (val.length < V.sizeof) {
-		debug writeln("val ", val);
+	if (val.length < V.sizeof)
 		throw new DBException("Value length mismatch");
-	}
 	T t;
-	//if (key.length == K.sizeof) {
-	//	*cast(K*)&t = *cast(K*)key.ptr;
-	//}
-	//if (val.length == V.sizeof) {
-	//	*cast(V*)&t = *cast(V*)val.ptr;
-	//}
+	if (key.length == K.sizeof && val.length == V.sizeof) {
+		*cast(K*)&t = *cast(K*)key.ptr;
+		*cast(V*)(cast(void*)&t + K.sizeof) = *cast(V*)val.ptr;
+		return t;
+	}
 	const k = key.ptr;
 	const v = val.ptr;
 	foreach (I, ref x; t.tupleof) {
@@ -471,19 +495,6 @@ MDB_dbi openDB(T)(MDB_txn* txn) @trusted {
 	check(mdb_dbi_open(txn, modelOf!U.name, flags, &dbi));
 	return dbi;
 }
-
-void buildIndex(T)() {
-}
-
-/+ TODO
-void vacuum() {
-	static foreach (i; 1 .. maxdbs) {
-		foreach(val; cursor!(DBs[i])) {
-			openDB!Blob(txn).set(val.key, val.val);
-		}
-	}
-	db[0].txn.commit();
-}+/
 
 void intern(MDB_txn* txn, ref Val data) @trusted {
 	import lmdb_orm.xxh3;
@@ -556,10 +567,11 @@ void onUpdate(T)(MDB_txn* txn, CheckFlags flags, ref T obj) {
 template tryGet(alias key) {
 	static if (isPK!x) {
 		// TODO: check compound primary key
-		const dbi = openDB!T(txn);
+		alias I = T;
 	} else {
-		const dbi = openDB!(UniqueIndex!(T, x))(txn);
+		alias I = UniqueIndex!(T, x);
 	}
+	const dbi = openDB!I(txn);
 	auto obj = Tuple!(typeof(key))(key);
 	mixin serialize!(obj, 0, keyCount!T);
 	Val val = void;
@@ -568,6 +580,7 @@ template tryGet(alias key) {
 
 unittest {
 	import std.meta;
+	import std.exception;
 	import std.stdio;
 	import std.string : cmp;
 
@@ -575,10 +588,13 @@ unittest {
 	remove("./db/test2/lock.mdb");
 
 	auto db = DB(256 << 10);
+	static assert(!__traits(compiles, { auto db2 = db; }));
 	db.open("./db/test2", EnvFlags.writeMap);
 	auto txn = db.begin();
+	static assert(!__traits(compiles, { auto txn2 = txn; }));
 	txn.save(Company(1, "foo", "City A"));
 	txn.save(Company(2, "bar", "City B"));
+	assertThrown!DBException(txn.save(Company(0, "foo")));
 	string last;
 	foreach (c; txn.cursor!(UniqueIndex!(Company, Company.name))) {
 		assert(cmp(last, c.key) < 0);
@@ -586,6 +602,7 @@ unittest {
 		assert(txn.exists!(Company, "name")(c.key));
 		assert(txn.exists!Company(c.val));
 	}
+	// save
 	txn.save(User(0, "Alice", 1));
 	txn.save(User(0, "Bob", 2));
 	txn.commit();
@@ -593,28 +610,38 @@ unittest {
 	foreach (user; txn.cursor!User()) {
 		writeln(user);
 	}
+	assert(txn.exists!User(1));
+	assert(txn.find!User(1).name == "Alice");
+	assert(txn.find!(User.name)("Bob").id == 2);
+	assert(txn.findP!User(1).name == "Alice");
+	assert(txn.findP!(User.name)("Bob").id == 2);
+	// update
 	txn = db.begin();
 	foreach (user; txn.mapper!User()) {
 		user.companyID = 1;
 	}
+	assertThrown!DBException(txn.save(User(0, "Ada", 3)));
 	txn.commit();
 	txn = db.begin();
-	writeln(txn.id);
+	const tid = txn.id;
+	assert(tid);
+	writeln(tid);
+	// delete
 	assert(txn.del!User(1));
 	assert(txn.del!Company(2));
+	txn.save(User(0, "Ada", 1));
+	assertThrown!DBException(txn.save(User(0, "Ada", 1)));
 	txn.commit();
 	txn = db.begin(TxnFlags.readOnly);
 	foreach (user; txn.cursor!User()) {
 		assert(user.companyID == 1);
 	}
-	//txn = db.begin();
-	//foreach (user; txn.mapper!User()) {
-	//	user.companyID = 2;
-	//}
-	//txn.commit();
-	//txn = db.begin(TxnFlags.readOnly);
+	// rollback
+	txn = db.begin();
+	txn.save(User(1, "Alice", 1));
+	txn.abort();
+	txn = db.begin(TxnFlags.readOnly);
 	foreach (user; txn.cursor!User()) {
-		writeln(user);
-		assert(user.companyID == 1);
+		assert(user.id > 1);
 	}
 }

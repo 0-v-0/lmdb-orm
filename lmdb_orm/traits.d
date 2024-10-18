@@ -59,7 +59,7 @@ template getSerial(alias x) {
 		alias getSerial = udas[0];
 		enum index = -1;
 	}
-	static if (is(x) && isPOD!x) {
+	static if (is(x)) {
 		static foreach (i, alias f; x.tupleof) {
 			static if (getSerial!f != serial.invalid) {
 				static assert(i == 0, "Serial column must be the first column");
@@ -128,11 +128,14 @@ alias Del = bool delegate() @safe;
 
 package:
 
-template CallNext(T, string name) {
-	static if (is(typeof(next())))
-		alias args = AliasSeq!(obj, next);
+template Call(alias func, args...) {
+	static if (is(typeof(func(args)) == void))
+		int _ = { func(args); return 0; }();
 	else
-		alias args = obj;
+		const ret = func(args);
+}
+
+template CallNext(T, string name, args...) {
 	static if (is(typeof(__traits(getMember, T, name)(args)))) {
 		alias func = __traits(getMember, T, name);
 		static foreach (sc; __traits(getParameterStorageClasses, func(args), 1)) {
@@ -141,14 +144,9 @@ template CallNext(T, string name) {
 		}
 		static assert(is(typeof(isScope)), "The first parameter of " ~
 				fullyQualifiedName!func ~ " must be scope");
-		int _ = { func(obj, next); return 0; }();
-	} else static if (is(typeof(next()))) {
-		static if (is(typeof(next()) == void)) {
-			int _ = { next(); return 0; }();
-		} else {
-			const ret = next();
-		}
-	}
+		mixin Call!(func, args);
+	} else static if (is(typeof(args[1]())))
+		mixin Call!(args[1]);
 }
 
 union Arr {
@@ -163,7 +161,11 @@ struct Tuple(T...) {
 	T expand;
 }
 
-template keyCount(T) {
+/** Get the number of primary keys of the table
+Params:
+	T: the table
+*/
+template keyCount(T) if (isPOD!T) {
 	static foreach_reverse (i, alias x; T.tupleof) {
 		static if (is(typeof(keyCount) == void)) {
 			static if (isPK!x)
@@ -184,11 +186,6 @@ unittest {
 /// Get the type of the primary keys of the table
 alias TKey(T) = typeof(T.tupleof[0 .. keyCount!T]);
 
-struct KVSplitter(T, alias filter) {
-	Filter!(filter, T.tupleof) expand;
-	void[0] end;
-}
-
 /// threshold for inlining arrays, default 64
 // TODO
 enum lengthThreshold = size_t.max;
@@ -198,25 +195,26 @@ enum isFixedSize(T...) = !anySatisfy!(isDynamicArray, T);
 alias Intern = void function(MDB_txn*, ref Val) @safe;
 
 /// Get the size of the serialized object
-void setSize(bool key = false, T)(@restrict ref Arr a, @restrict ref T obj, MDB_txn* txn, Intern intern = null) {
-	static if (key)
-		alias args = AliasSeq!(obj.tupleof[0 .. keyCount!T]);
-	else
-		alias args = AliasSeq!(obj.tupleof[keyCount!T .. $]);
+void setSize(bool key = false, T)(@restrict ref Arr a, @restrict ref T obj, @restrict MDB_txn* txn, Intern intern = null) {
+	static if (key) {
+		enum start = 0;
+		enum end = keyCount!T;
+	} else {
+		enum start = keyCount!T;
+		enum end = T.tupleof.length;
+	}
+	alias args = AliasSeq!(obj.tupleof[start .. end]);
 	static if (isFixedSize!(typeof(args))) {
 		a.m.mv_size = Tuple!(typeof(args)).sizeof;
 	} else {
-		static if (key)
-			a.m.mv_size = byteLen!(0, keyCount!T)(obj, txn, intern);
-		else
-			a.m.mv_size = byteLen!(keyCount!T)(obj, txn, intern);
+		a.m.mv_size = byteLen!(start, end)(obj, txn, intern);
 	}
 }
 
 /// Get the size of the serialized object
-size_t byteLen(size_t start, size_t end = 0, T)(@restrict ref T obj, MDB_txn* txn, Intern intern = null) {
-	size_t size = Tuple!(typeof(T.tupleof[start .. end ? end: $])).sizeof;
-	foreach (i, ref x; obj.tupleof[start .. end ? end: $]) {
+size_t byteLen(size_t start, size_t end, T)(@restrict ref T obj, @restrict MDB_txn* txn, Intern intern = null) {
+	size_t size = Tuple!(typeof(T.tupleof[start .. end])).sizeof;
+	foreach (i, ref x; obj.tupleof[start .. end]) {
 		static if (isDynamicArray!(typeof(x))) {
 			if (x.length < lengthThreshold) // inline
 				size += x.length * typeof(x[0]).sizeof;
@@ -229,7 +227,7 @@ size_t byteLen(size_t start, size_t end = 0, T)(@restrict ref T obj, MDB_txn* tx
 
 unittest {
 	auto u = User(1, "foo", 1);
-	assert(byteLen!(1)(u, null) == 16 + 8 * 3 + "foo".length);
+	assert(byteLen!(1, User.tupleof.length)(u, null) == 16 + 8 * 3 + "foo".length);
 	auto c = Company(1, "bar", "address");
 	assert(byteLen!(0, 1)(c, null) == 8);
 	auto r = Relation(1, 2, RelationType.friend);
@@ -237,7 +235,7 @@ unittest {
 	assert(byteLen!(2, 3)(r, null) == 4);
 }
 
-enum isPOD(alias x) = __traits(isPOD, x);
+enum isPOD(T) = __traits(isPOD, T);
 
 template getUDAValues(alias x, UDA, UDA defaultVal = UDA.init) {
 	template toVal(alias uda) {
@@ -325,13 +323,11 @@ struct User {
 	long createdAt;
 	long updatedAt;
 
-	static void onSave(T)(T user, scope Save next) {
-		if (next) {
-			if (!user.createdAt)
-				user.createdAt = now();
-			user.updatedAt = now();
-			next();
-		}
+	static void onSave(T)(ref T user, scope Save next) {
+		if (!user.createdAt)
+			user.createdAt = now();
+		user.updatedAt = now();
+		next();
 	}
 }
 
@@ -361,7 +357,7 @@ struct Relation {
 	}
 	RelationType type;
 
-	static void onSave(T)(T r, scope Next next) {
+	static void onSave(T)(ref T r, scope Next next) {
 		if (r.type < RelationType.min || r.type > RelationType.max)
 			throw new Exception("Invalid relation type");
 
@@ -375,6 +371,6 @@ struct Relation {
 	try {
 		return Clock.currStdTime;
 	} catch (Exception) {
-		return 0;
+		return long.max;
 	}
 }

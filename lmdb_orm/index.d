@@ -19,7 +19,7 @@ package template UniqueIndices(Tables...) {
 }
 
 /// Unique index
-template UniqueIndex(T, alias x){
+template UniqueIndex(T, alias x) if (UDAof!(x, unique).name.length) {
 	@model(modelOf!T.name ~ "." ~ UDAof!(x, unique).name)
 	struct UniqueIndex {
 		@PK typeof(x) key;
@@ -28,7 +28,8 @@ template UniqueIndex(T, alias x){
 }
 
 /// Inverted index
-template InvIndex(string name, alias x) if (getSerial!(__traits(parent, x)) != serial.invalid) {
+template InvIndex(string name, alias x)
+if (getSerial!(__traits(parent, x)) != serial.invalid) {
 	@model(name, DBFlags.dupFixed)
 	struct InvIndex {
 		@PK string key;
