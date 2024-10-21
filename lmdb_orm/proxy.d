@@ -5,15 +5,6 @@ import lmdb_orm.traits;
 import std.meta;
 import std.traits;
 
-private enum DIRTY = size_t(1) << (8 * size_t.sizeof - 1);
-private template Common() {
-	static if (i < _keyCount) {
-		const a = _cur.key;
-	} else {
-		const a = _cur.val;
-	}
-}
-
 private template Def(bool readonly) {
 	import lmdb_orm.oo;
 
@@ -96,14 +87,6 @@ private template Def(bool readonly) {
 	}
 }
 
-private template KV() {
-	import lmdb_orm.oo;
-
-private:
-	Val key;
-	Val val;
-}
-
 /// readonly proxy for a database record
 struct Proxy(T) if (isPOD!T) {
 	mixin KV _cur;
@@ -120,4 +103,23 @@ struct Proxy(T, bool readonly) if (isPOD!T) {
 /// Remove a record from the database
 void remove(T)(Proxy!(T, false) p) {
 	p._cur.del();
+}
+
+private:
+
+enum DIRTY = size_t(1) << (8 * size_t.sizeof - 1);
+template Common() {
+	static if (i < _keyCount) {
+		const a = _cur.key;
+	} else {
+		const a = _cur.val;
+	}
+}
+
+template KV() {
+	import lmdb_orm.oo;
+
+private:
+	Val key;
+	Val val;
 }
