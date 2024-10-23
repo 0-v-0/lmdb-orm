@@ -91,6 +91,40 @@ public struct FSDB(modules...) {
 			mixin CallNext!(T, "onSave", obj, next);
 		}
 
+		bool del(T)(TKey!T key) {
+			scope Del next = () @trusted {
+				static if (hasUniqueIndex!T) {
+					if (checkFlags & CheckFlags.unique) {
+						try {
+							// TODO: optimize
+							auto m = txn.find!T(key);
+							foreach (i, alias x; T.tupleof) {
+								static if (hasUDA!(x, unique)) {
+									mixin serialize!(m, i, i + 1, false);
+									const rc = mdb_del(txn, openDB!(UniqueIndex!(T, x))(txn), &bytes, null);
+									if (rc != MDB_NOTFOUND)
+										check(rc);
+								}
+							}
+						} catch (DBException) {
+							return false;
+						}
+					}
+				}
+				const dbi = openDB!T(txn);
+				auto obj = Tuple!(typeof(key))(key);
+				mixin serialize!(obj, 0);
+				const rc = mdb_del(txn, dbi, &bytes, null);
+				if (rc == MDB_NOTFOUND)
+					return false;
+				check(rc);
+				// TODO: implement cascade delete
+				return true;
+			};
+			mixin CallNext!(T, "onDelete", key, next);
+			return ret;
+		}
+
 	private:
 		alias close = mdb_txn_abort;
 
@@ -243,10 +277,10 @@ static template find(alias x) {
 	}
 }
 
-static template findP(alias x) {
+static template findMapped(alias x) {
 	static if (is(x)) {
 		alias T = x;
-		auto findP(MDB_txn* txn, TKey!T key) @trusted {
+		auto findMapped(MDB_txn* txn, TKey!T key) @trusted {
 			import lmdb_orm.proxy;
 
 			alias x = Alias!(T.tupleof[0]);
@@ -256,28 +290,12 @@ static template findP(alias x) {
 		}
 	} else {
 		alias T = __traits(parent, x);
-		auto findP(MDB_txn* txn, typeof(x) key) @trusted {
+		auto findMapped(MDB_txn* txn, typeof(x) key) @trusted {
 			mixin tryGet!key;
 			check(rc);
-			return findP!T(txn, deserialize!(TKey!T)(Arr(val).m));
+			return findMapped!T(txn, deserialize!(TKey!T)(Arr(val).m));
 		}
 	}
-}
-
-bool del(T)(MDB_txn* txn, TKey!T key) {
-	scope Del next = () @trusted {
-		const dbi = openDB!T(txn);
-		auto obj = Tuple!(typeof(key))(key);
-		mixin serialize!(obj, 0);
-		const rc = mdb_del(txn, dbi, &bytes, null);
-		if (rc == MDB_NOTFOUND)
-			return false;
-		check(rc);
-		// TODO: implement cascade delete
-		return true;
-	};
-	mixin CallNext!(T, "onDelete", key, next);
-	return ret;
 }
 
 struct Cursor(T, bool proxy = false) {
@@ -587,7 +605,7 @@ unittest {
 	remove("./db/test2/data.mdb");
 	remove("./db/test2/lock.mdb");
 
-	auto db = DB(256 << 10);
+	auto db = DB(512 << 10);
 	static assert(!__traits(compiles, { auto db2 = db; }));
 	db.open("./db/test2", EnvFlags.writeMap);
 	auto txn = db.begin();
@@ -613,8 +631,8 @@ unittest {
 	assert(txn.exists!User(1));
 	assert(txn.find!User(1).name == "Alice");
 	assert(txn.find!(User.name)("Bob").id == 2);
-	assert(txn.findP!User(1).name == "Alice");
-	assert(txn.findP!(User.name)("Bob").id == 2);
+	assert(txn.findMapped!User(1).name == "Alice");
+	assert(txn.findMapped!(User.name)("Bob").id == 2);
 	// update
 	txn = db.begin();
 	foreach (user; txn.mapper!User()) {

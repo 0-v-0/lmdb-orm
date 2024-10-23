@@ -126,7 +126,11 @@ enum isPK(alias x) = hasUDA!(x, PK) || hasUDA!(x, serial);
 alias Save = void delegate() @safe;
 alias Del = bool delegate() @safe;
 
+/// Check if the table has unique index
+enum hasUniqueIndex(T) = anySatisfy!(isUnique, T.tupleof);
+
 package:
+enum isUnique(alias x) = hasUDA!(x, unique);
 
 template Call(alias func, args...) {
 	static if (is(typeof(func(args)) == void))

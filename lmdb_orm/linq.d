@@ -52,13 +52,14 @@ template scoped(T) if (classInstanceAlignment!T <= ubyte.max) {
 
 		@disable this();
 		@disable this(this);
-
+// dfmt off
 		static if (hasMember!(T, "__xdtor"))
 			~this() {
 				// `destroy` will also write .init but we have no functions in druntime
 				// for deterministic finalization and memory releasing for now.
 				.destroy(Scoped_payload);
 			}
+// dfmt on
 	}
 
 	/** Returns the _scoped object.
@@ -743,4 +744,88 @@ unittest {
 		0, 1, 2, 3, 4, 10, 11, 12, 13, 14
 	]));
 	assert(symDiff(iota(0, 10, 2), iota(1, 10, 2)).equal(iota(0, 10, 1)));
+}
+
+class Ordered(R, bool allowDup = true, E = ForeachType!R) : Iterator!E {
+	import std.container.rbtree;
+	import std.range;
+
+	alias RBTree = RedBlackTree!(E, less, allowDup);
+	alias Less = extern (D) bool function(E, E);
+	R r;
+	Take!(RBTree.Range) tr;
+	Less less;
+
+	this(R range, size_t limit = size_t.max) {
+		this(range, (E a, E b) => a < b, limit);
+	}
+
+	this(R range, Less cmp, size_t limit = size_t.max) {
+		r = range;
+		less = cmp;
+		auto tree = new RBTree(r);
+		tr = tree[].take(limit);
+	}
+
+	@property override E front()
+	in (!empty) => tr.front;
+
+	@property override bool empty() => tr.empty;
+
+	override void popFront() => tr.popFront();
+}
+
+auto ordered(R, bool allowDup = true, E = ForeachType!R)(R r, size_t limit = size_t.max)
+	=> scoped!(Ordered!(R, allowDup, E))(r, limit);
+
+extern (D) auto ordered(R, bool allowDup = true, E = ForeachType!R)(R r, bool function(E, E) cmp, size_t limit = size_t
+		.max)
+	=> scoped!(Ordered!(R, allowDup, E))(r, cmp, limit);
+
+unittest {
+	import std.algorithm;
+	import std.range;
+
+	auto r = iota(0, 0);
+	auto o = ordered(r);
+	assert(o.empty);
+}
+
+unittest {
+	import std.algorithm;
+	import std.range;
+
+	static struct TestRange {
+		int i;
+		@property bool empty() => i == 5;
+
+		@property int front() {
+			switch (i) {
+			case 0:
+				return 1;
+			case 1:
+				return 4;
+			case 2:
+				return 2;
+			case 3:
+				return 3;
+			case 4:
+				return 5;
+			default:
+				assert(0);
+			}
+		}
+
+		void popFront() {
+			++i;
+		}
+	}
+
+	auto r = TestRange();
+	assert(ordered(r).equal([1, 2, 3, 4, 5]));
+	assert(ordered(r, 3).equal([1, 2, 3]));
+	assert(ordered(r, 10).equal([1, 2, 3, 4, 5]));
+	auto greater = (int a, int b) => b < a;
+	assert(ordered!TestRange(r, greater).equal([5, 4, 3, 2, 1]));
+	assert(ordered!TestRange(r, greater, 3).equal([5, 4, 3]));
 }

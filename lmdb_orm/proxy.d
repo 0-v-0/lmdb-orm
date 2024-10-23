@@ -69,7 +69,7 @@ private template Def(bool readonly) {
 			return *cast(F*)(a.ptr + offset);
 		}
 
-		static if (!readonly && !isPK!f && isMutable!(F))
+		static if (!readonly && !isPK!f && isMutable!F)
 			auto opDispatch(F value) @trusted {
 				mixin Common;
 				assert(offset + f.sizeof <= _cur.val.length, "offset out of range");
