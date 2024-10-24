@@ -56,14 +56,14 @@ private template Def(bool readonly) {
 		auto opDispatch() @trusted {
 			mixin Common;
 			assert(offset + f.sizeof <= a.length, "offset out of range");
-			static if (isDynamicArray!(F)) {
+			static if (isDynamicArray!F) {
 				enum end = P.sizeof;
 
 				Arr res = *cast(Arr*)(a.ptr + offset);
 				if (end <= res.s[1] && res.s[1] <= a.length)
 					res.s[1] += cast(size_t)a.ptr;
 				else
-					assert(0, "invalid pointer");
+					throw new DBException("invalid array");
 				return res.v;
 			}
 			return *cast(F*)(a.ptr + offset);

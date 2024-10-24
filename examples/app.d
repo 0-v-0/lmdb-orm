@@ -1,8 +1,7 @@
 module app;
 
-import std.meta;
-import std.stdio;
 import lmdb_orm;
+import std.stdio;
 
 @model
 struct User {
@@ -67,7 +66,6 @@ struct Relation {
 alias DB = FSDB!(app);
 
 void main() {
-    alias modules = AliasSeq!(app);
     auto db = DB(256 << 10);
     db.open("../db/app", EnvFlags.writeMap);
     auto txn = db.begin();

@@ -374,9 +374,6 @@ enum blobDbName = "#blob";
 struct Blob;
 
 template serialize(alias obj, size_t start, size_t end = obj.tupleof.length, bool setIntern = true) {
-	import core.volatile;
-	import std.file;
-
 	alias TT = typeof(obj.tupleof[start .. end]);
 	alias P = Tuple!(typeof(TT));
 	static if (isFixedSize!TT) {
@@ -393,7 +390,7 @@ template serialize(alias obj, size_t start, size_t end = obj.tupleof.length, boo
 			auto p = alloca(length);
 		auto bytes = {
 			assert(P.sizeof <= length);
-			size_t i = P.sizeof;
+			auto i = P.sizeof;
 			foreach (I, ref x; obj.tupleof[start .. end]) {
 				alias U = typeof(x);
 				alias O = OriginalType!U;
@@ -509,7 +506,7 @@ MDB_dbi openDB(T)(MDB_txn* txn) @trusted {
 	enum flags = DBFlags.create | modelOf!U.flags |
 		(getSerial!U == serial.invalid ? DBFlags.none : DBFlags.integerKey);
 	MDB_dbi dbi = void;
-	debug pragma(msg, "open " ~ modelOf!U.name);
+	debug(Log) pragma(msg, "open " ~ modelOf!U.name);
 	check(mdb_dbi_open(txn, modelOf!U.name, flags, &dbi));
 	return dbi;
 }

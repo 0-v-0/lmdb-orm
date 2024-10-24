@@ -142,6 +142,12 @@ template Call(alias func, args...) {
 template CallNext(T, string name, args...) {
 	static if (is(typeof(__traits(getMember, T, name)(args)))) {
 		alias func = __traits(getMember, T, name);
+		static if (is(typeof(func!(typeof(args[0])))))
+			alias f = func!(typeof(args[0]));
+		else
+			alias f = func;
+		static assert(!(functionAttributes!f & FunctionAttribute.property),
+			fullyQualifiedName!func ~ " must be a function, not a property");
 		static foreach (sc; __traits(getParameterStorageClasses, func(args), 1)) {
 			static if (sc == "scope")
 				enum isScope = true;
