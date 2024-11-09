@@ -554,6 +554,8 @@ template Ctor(R) {
 	}
 }
 
+public:
+
 extern (C++):
 
 interface Iterator(T) {

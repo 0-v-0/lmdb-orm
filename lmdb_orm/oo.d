@@ -289,11 +289,11 @@ struct Cursor {
 			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 		/// ditto
-		int set(T, U)(in ref T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
+		int set(T, U)(ref T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
 			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 		/// ditto
-		int set(T, U)(in ref T[] key, in ref U[] val, WriteFlags flags = WriteFlags.none)
+		int set(T, U)(ref T[] key, ref U[] val, WriteFlags flags = WriteFlags.none)
 			=> mdb_cursor_put(cursor, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 		/// Delete by cursor.
@@ -627,7 +627,7 @@ nothrow:
 		flags = optional flags for this operation.
 	Returns: 0 on success, non-zero on failure.
 	 */
-	int set(in ref Val key, in ref Val val, WriteFlags flags = WriteFlags.none)
+	int set(ref Val key, ref Val val, WriteFlags flags = WriteFlags.none)
 		=> mdb_put(txn, dbi, cast(MDB_val*)&key, cast(MDB_val*)&val, flags);
 
 	/// ditto

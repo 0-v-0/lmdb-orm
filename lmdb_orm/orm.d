@@ -250,6 +250,7 @@ template exists(T, string member = null) {
 	}
 }
 
+/// find a record
 static template find(alias x) {
 	static if (is(x)) {
 		alias T = x;
