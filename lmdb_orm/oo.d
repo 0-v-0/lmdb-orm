@@ -603,7 +603,7 @@ struct LMDB {
 		defValue = the default value to return if the key is not found
 		Returns: the data item for that key
 	 */
-	Val get(const ref Val key, in Val defValue) @trusted {
+	Val get(const ref Val key, in return Val defValue) @trusted {
 		MDB_val val = void;
 		int rc = mdb_get(txn, dbi, cast(MDB_val*)&key, &val);
 		if (rc == MDB_NOTFOUND)

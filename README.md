@@ -1,5 +1,5 @@
-# lmdb ORM
-A simple ORM for lmdb
+# LMDB ORM
+A simple ORM for LMDB
 
 ## Features
 - Cross platform

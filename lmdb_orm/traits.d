@@ -2,13 +2,9 @@ module lmdb_orm.traits;
 
 import std.meta;
 import std.traits;
+package import tame.builtins;
 import lmdb_orm.oo;
 import lmdb_orm.lmdb : MDB_txn;
-
-version (LDC)
-	import ldc.attributes;
-else
-	private enum restrict;
 
 /// Check flags for column
 enum CheckFlags {
@@ -297,26 +293,6 @@ template getSymbolsWith(alias attr, symbols...) {
 		static foreach (name; __traits(derivedMembers, symbol))
 			static if (hasAttr!(symbol, name))
 				getSymbolsWith = AliasSeq!(getSymbolsWith, __traits(getMember, symbol, name));
-	}
-}
-
-pure @nogc @safe {
-	bool likely(bool exp) {
-		version (LDC) {
-			import ldc.intrinsics;
-
-			return llvm_expect(exp, true);
-		} else
-			return exp;
-	}
-
-	bool unlikely(bool exp) {
-		version (LDC) {
-			import ldc.intrinsics;
-
-			return llvm_expect(exp, false);
-		} else
-			return exp;
 	}
 }
 

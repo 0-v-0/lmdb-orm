@@ -26,7 +26,7 @@ pragma(inline, true) package static void checkEmpty(alias f)(ref typeof(f) val) 
 }
 
 /// Fixed-Schema Database
-public struct FSDB(modules...) {
+struct FSDB(modules...) {
 	alias Tables = getTables!modules;
 	/// Maximum number of databases for the environment
 	enum maxdbs = DBs.length;
@@ -513,7 +513,7 @@ MDB_dbi openDB(T)(MDB_txn* txn) @trusted {
 }
 
 void intern(MDB_txn* txn, ref Val data) @trusted {
-	import lmdb_orm.xxh3;
+	import tame.hash.xxh3;
 
 	XXH64_hash_t seed;
 rehash:
